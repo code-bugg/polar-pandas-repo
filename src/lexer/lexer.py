@@ -280,8 +280,77 @@ class _Lexer:
     def _unknown_char(self) -> None:             # Member D
         raise NotImplementedError("Member D: _unknown_char not yet implemented")
 
+    # ── KEYWORDS set (Member B) ──────────────────────────────────────────
+    # 66 reserved words (all stored UPPERCASE). Includes v1.1 additions:
+    # IF, THEN, ELSE, END, FOR, EACH, OVER, DO, EXISTS, ROWCOUNT, NULLCOUNT.
+
+    KEYWORDS: set[str] = {
+        # ── I/O & inspection ──────────────────────────────────────────────
+        "LOAD", "EXPORT", "PREVIEW", "INFO", "DESCRIBE",
+        # ── Data source / target ──────────────────────────────────────────
+        "AS", "TO", "FROM", "IN", "INTO",
+        # ── Selection & filtering ─────────────────────────────────────────
+        "SELECT", "COLUMNS", "FILTER", "WHERE",
+        # ── Cleaning ──────────────────────────────────────────────────────
+        "DROP", "NULLS", "DUPLICATES", "FILL", "WITH",
+        # ── Column operations ─────────────────────────────────────────────
+        "CAST", "ADD", "COLUMN", "RENAME", "SORT", "BY",
+        # ── Aggregation ───────────────────────────────────────────────────
+        "GROUP", "COUNT", "JOIN",
+        # ── Sorting modifiers ─────────────────────────────────────────────
+        "ASC", "DESC",
+        # ── Plot ──────────────────────────────────────────────────────────
+        "PLOT", "TYPE", "X", "Y", "TITLE", "SAVE",
+        # ── Engine ────────────────────────────────────────────────────────
+        "SET", "ENGINE",
+        # ── Aggregation functions ─────────────────────────────────────────
+        "SUM", "MEAN", "MIN", "MAX", "MEDIAN",
+        # ── Data types ────────────────────────────────────────────────────
+        "INT", "FLOAT", "STR", "BOOL",
+        # ── Join types ────────────────────────────────────────────────────
+        "INNER", "LEFT", "RIGHT", "OUTER", "ON",
+        # ── Logical operators (in conditions) ─────────────────────────────
+        "AND", "OR", "NOT",
+        # ── Control flow (v1.1) ───────────────────────────────────────────
+        "IF", "THEN", "ELSE", "END",
+        "FOR", "EACH", "OVER", "DO",
+        # ── Meta-condition keywords (v1.1) ────────────────────────────────
+        "EXISTS", "ROWCOUNT", "NULLCOUNT",
+        # ── Plot types ────────────────────────────────────────────────────
+        "BAR", "LINE", "SCATTER", "HIST",
+        # ── Miscellaneous ─────────────────────────────────────────────────
+        "USING", "ROWS",
+    }
+
     def _consume_word(self) -> None:             # Member B
-        raise NotImplementedError("Member B: _consume_word not yet implemented")
+        """Read the longest [a-zA-Z_][a-zA-Z0-9_]* sequence, then classify:
+        - ``true`` / ``false`` (case-insensitive) → BOOL token
+        - word found in KEYWORDS (case-insensitive) → KW token (stored UPPER)
+        - anything else → IDENT token (original casing preserved)
+        """
+        start_line = self._line
+        start_pos = self._pos
+
+        # Consume the full word using maximal munch
+        while not self.at_end():
+            ch = self.peek()
+            if ch is not None and (ch.isalnum() or ch == "_"):
+                self.advance()
+            else:
+                break
+
+        word = self._source[start_pos:self._pos]
+        upper = word.upper()
+
+        # Booleans: true / false (case-insensitive) → BOOL
+        if upper in ("TRUE", "FALSE"):
+            self._emit(TokenType.BOOL, upper, start_line)
+        # Keywords: case-insensitive match against KEYWORDS set → KW
+        elif upper in self.KEYWORDS:
+            self._emit(TokenType.KW, upper, start_line)
+        # Everything else → IDENT (original casing)
+        else:
+            self._emit(TokenType.IDENT, word, start_line)
 
     def _consume_string(self) -> None:           # Member C
         raise NotImplementedError("Member C: _consume_string not yet implemented")
