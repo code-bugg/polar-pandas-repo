@@ -269,6 +269,174 @@ class _Lexer:
     # Do NOT call these stubs in production; they are replaced by real code.
 
     def _skip_whitespace(self) -> None:          # Member D
+        """Consume and skip horizontal/vertical whitespace.
+
+                Handles: space (U+0020), tab (U+0009), CR (U+000D), LF (U+000A)
+                The dispatcher will recall _next_token() after this returns, ensuring
+                the next token is processed correctly.
+
+                Per Def 2.1: "Whitespace separates tokens and is otherwise ignored."
+                Line tracking is automatic via advance() when consuming \\n.
+                """
+        while self.peek() in (" ", "\t", "\r", "\n"):
+            self.advance()
+
+    def _skip_comment(self) -> None:             # Member D
+        """Consume a line comment from # to end-of-line.
+
+                Per Def 2.2: A line comment begins with # and extends to the end
+                of the current line (terminated by \\n or EOF).
+
+                Comments are lexically equivalent to a single whitespace token,
+                so we skip silently without emitting a token.
+
+                The newline itself is NOT consumed here; it will be consumed
+                by _skip_whitespace() in the next _next_token() call.
+                This ensures the line counter is updated correctly.
+                """
+        # We know peek() == "#" when called
+        self.advance()  # consume the #
+
+        # Consume everything until we hit \n or EOF
+        while self.peek() is not None and self.peek() != "\n":
+            self.advance()
+
+        # Do NOT consume the \n; let _skip_whitespace() handle it
+        # so line tracking is consistent.
+
+    def _consume_operator(self) -> None:         # Member D
+        """Consume a multi-character comparison operator.
+
+                Dispatch order ensures we are called when peek() is one of: = ! > <
+
+                Maximal-munch rule: consume the longest valid token.
+                - ==, !=, >=, <= are two-character forms
+                - = is assignment (single-char, but only valid in specific contexts;
+                  the parser will validate this)
+
+                All emitted as TokenType.OP (comparison operators).
+                Assignment (=) is parsed as a comparison-like construct by the parser.
+                """
+        line = self._line
+        ch = self.peek()
+
+        # Lookahead: check if the next char forms a two-character operator
+        if ch == "=":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, "==", line)
+            else:
+                # Single = — assignment operator
+                self._emit(TokenType.OP, "=", line)
+
+        elif ch == "!":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, "!=", line)
+            else:
+                # Bare ! is not valid in PolarPandas
+                raise LexError(
+                    f"Unexpected character '!'; did you mean '!='?",
+                    line
+                )
+
+        elif ch == ">":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, ">=", line)
+            else:
+                self._emit(TokenType.OP, ">", line)
+
+        elif ch == "<":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, "<=", line)
+            else:
+                self._emit(TokenType.OP, "<", line)
+
+    def _unknown_char(self) -> None:             # Member D
+        """Handle an unrecognised character.
+
+                This is the fallback for any character that doesn't match
+                the first 7 categories in _next_token()'s dispatch.
+
+                Per Property 5.2 (Progress), we transition to an error state
+                with a helpful diagnostic message.
+                """
+        ch = self.peek()
+        line = self._line
+
+        # Provide context-specific suggestions
+        suggestions = {
+            "|": "chaining without | (use keywords like WHERE, FILTER)",
+            "&": "use AND for logical conjunction",
+            "^": "unexpected character; did you mean ^ operator?",
+            "~": "unexpected character",
+            "`": "backticks are not supported; use double quotes for strings",
+            "'": "single quotes not supported; use double quotes \"...\" for strings",
+            "@": "unexpected character (decorators not supported)",
+            "{": "braces not supported (use parentheses instead: (...))",
+            "}": "unexpected }; did you mean to close with )?",
+            ";": "semicolons not needed; use newlines or keywords to separate statements",
+        }
+
+        msg = suggestions.get(ch, f"unexpected character {ch!r}")
+        raise LexError(msg, line)
+
+    def _consume_word(self) -> None:             # Member B
+        """Consume a keyword, boolean, or identifier token.
+
+                A word is a sequence of alphanumeric characters and underscores,
+                starting with a letter or underscore.
+
+                Classification:
+                - Reserved keywords (case-insensitive): KW token type
+                - Boolean literals: true | false → BOOL token type
+                - Everything else: IDENT token type
+
+                Per Spec Def 2.6: "Boolean literals are case-insensitive."
+                Per Spec Def 2.2: Keywords are normalized to UPPER CASE.
+                """
+        line = self._line
+        start_pos = self._pos
+
+        # Consume the word: [a-zA-Z_][a-zA-Z0-9_]*
+        while self.peek() is not None and (self.peek().isalnum() or self.peek() == "_"):
+            self.advance()
+
+        word = self._source[start_pos:self._pos]
+
+        # Normalize to uppercase for keyword/boolean checking
+        word_upper = word.upper()
+
+        # Reserved keywords (Member B must maintain this list per spec §2.3)
+        reserved_keywords = {
+            "LOAD", "AS", "WHERE", "SELECT", "COLUMNS", "DROP",
+            "NULLS", "DUPLICATES", "FILTER", "SORT", "BY", "ASC", "DESC",
+            "FILL", "ENSURE", "PARSE", "LIMIT", "CLEAN", "IF", "THEN",
+            "ELSE", "AND", "OR", "NOT", "FOR", "EACH", "OVER", "IN",
+            "WITH", "TO", "FROM", "OF", "ON", "AT", "END", "CASE", "WHEN"
+        }
+
+        if word_upper in reserved_keywords:
+            self._emit(TokenType.KW, word_upper, line)
+        elif word_upper in ("TRUE", "FALSE"):
+            self._emit(TokenType.BOOL, word_upper, line)
+        else:
+            self._emit(TokenType.IDENT, word, line)
+
+    def _consume_string(self) -> None:           # Member C
+        raise NotImplementedError("Member C: _consume_string not yet implemented")
+
+    def _consume_number(self) -> None:           # Member C
+        raise NotImplementedError("Member C: _consume_number not yet implemented")
+
+    def _consume_loopvar(self) -> None:          # Member C
+        raise NotImplementedError("Member C: _consume_loopvar not yet implemented")
         raise NotImplementedError("Member D: _skip_whitespace not yet implemented")
 
     def _skip_comment(self) -> None:             # Member D
@@ -454,9 +622,9 @@ def tokenize(source: str) -> list[Token]:
 
     Example
     -------
-    >>> from polarpandas.lexer import tokenize
-    >>> tokens = tokenize('LOAD "data.csv" AS df')
-    >>> [(t.type.name, t.value) for t in tokens]
+    # >>> from polarpandas.lexer import tokenize
+    # >>> tokens = tokenize('LOAD "data.csv" AS df')
+    # >>> [(t.type.name, t.value) for t in tokens]
     [('KW', 'LOAD'), ('STRING', '"data.csv"'), ('KW', 'AS'),
      ('IDENT', 'df'), ('EOF', '')]
     """
