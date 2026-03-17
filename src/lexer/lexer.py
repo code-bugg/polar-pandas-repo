@@ -5,20 +5,16 @@ PolarPandas Translator — Component 1: Lexer
 Member A subtask: TokenType enum, Token dataclass, tokenize() entry point,
                   and the maximal-munch character dispatcher.
 
-Subtasks B, C, D will each add their consume_*() helpers into this same
-file. The public interface they must respect is:
+Subtasks B, C, D have added their consume_*() helpers into this file.
+The public interface is:
 
     tokenize(source: str) -> list[Token]
 
-and the shared types defined here:
+and the shared types:
 
     TokenType  (enum)
     Token      (dataclass)
-    LexError   (exception)          <- implemented by Member D
-
-The dispatcher (_next_token) is the only place that decides *which*
-consume_*() function to call. Members B, C, D implement those functions;
-Member A wires them in here.
+    LexError   (exception)
 """
 
 from __future__ import annotations
@@ -49,13 +45,12 @@ class TokenType(Enum):
     COMMA     = auto()   # ,
     STAR      = auto()   # *  used as wildcard in SELECT … COLUMNS *
     LOOPVAR   = auto()   # $identifier  loop variable in FOR EACH $col OVER … (v1.1)
+    DOT       = auto()   # .  member access separator, e.g. df.amount
     EOF       = auto()   # Sentinel: end of input
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. TOKEN DATACLASS
-#    Immutable value type.  Members B/C/D construct Token instances using
-#    the same class — do not add mutable state here.
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -84,8 +79,6 @@ class Token:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. LEXER ERROR
-#    Stub — Member D will fill in the body (collect-all error reporting).
-#    The class must exist here so the dispatcher can raise it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LexError(Exception):
@@ -108,8 +101,6 @@ class LexError(Exception):
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. LEXER STATE
-#    _Lexer encapsulates mutable cursor state so the stateless public
-#    function tokenize() can be called multiple times safely.
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _Lexer:
@@ -117,20 +108,12 @@ class _Lexer:
 
     The public entry point is ``tokenize(source)`` which constructs one
     ``_Lexer`` instance per call and returns its token list.
-
-    Members B, C, D add their consume_*() methods directly to this class.
-    Member A owns:
-        - __init__       (cursor initialisation)
-        - peek()         (non-consuming lookahead)
-        - advance()      (consuming one character, updating line counter)
-        - _next_token()  (the maximal-munch dispatcher)
-        - tokenize()     (the main loop)
     """
 
     def __init__(self, source: str) -> None:
-        self._source: str        = source
-        self._pos:    int        = 0       # current character index
-        self._line:   int        = 1       # current 1-based line number
+        self._source: str         = source
+        self._pos:    int         = 0       # current character index
+        self._line:   int         = 1       # current 1-based line number
         self._tokens: list[Token] = []
 
     # ── Cursor primitives ─────────────────────────────────────────────────
@@ -145,12 +128,6 @@ class _Lexer:
     def advance(self) -> str:
         """Consume and return the current character, updating the line
         counter when a newline is consumed.
-
-        Raises
-        ------
-        LexError
-            If called at end-of-source (should not happen in normal flow;
-            callers must check peek() first).
         """
         if self._pos >= len(self._source):
             raise LexError("Unexpected end of source", self._line)
@@ -172,13 +149,10 @@ class _Lexer:
         self._tokens.append(tok)
         return tok
 
-    # ── Maximal-munch dispatcher ──────────────────────────────────────────
+    # ── Maximal-munch dispatcher (Member A) ───────────────────────────────
 
     def _next_token(self) -> None:
         """Classify and consume the next token from the source.
-
-        This is the single dispatch point for all token types.
-        It is called repeatedly by ``_tokenize_all()`` until EOF.
 
         Dispatch order matters for maximal-munch correctness:
             1. Whitespace / comments  (Member D) — skip silently
@@ -192,40 +166,40 @@ class _Lexer:
         """
         ch = self.peek()
 
-        # ── 1. Whitespace and comments (Member D fills in) ────────────────
+        # ── 1. Whitespace and comments ────────────────────────────────────
         if ch in (" ", "\t", "\r", "\n"):
-            self._skip_whitespace()       # Member D
+            self._skip_whitespace()
             return
         if ch == "#":
-            self._skip_comment()          # Member D
+            self._skip_comment()
             return
 
-        # ── 2. LOOPVAR  $ident (Member C fills in) ────────────────────────
+        # ── 2. LOOPVAR  $ident ────────────────────────────────────────────
         if ch == "$":
-            self._consume_loopvar()       # Member C
+            self._consume_loopvar()
             return
 
-        # ── 3. STRING literal (Member C fills in) ─────────────────────────
+        # ── 3. STRING literal ─────────────────────────────────────────────
         if ch == '"':
-            self._consume_string()        # Member C
+            self._consume_string()
             return
 
-        # ── 4. NUMBER literal (Member C fills in) ─────────────────────────
+        # ── 4. NUMBER literal ─────────────────────────────────────────────
         if ch is not None and ch.isdigit():
-            self._consume_number()        # Member C
+            self._consume_number()
             return
 
-        # ── 5. WORD: keyword, boolean, or identifier (Member B fills in) ──
+        # ── 5. WORD: keyword, boolean, or identifier ──────────────────────
         if ch is not None and (ch.isalpha() or ch == "_"):
-            self._consume_word()          # Member B
+            self._consume_word()
             return
 
-        # ── 6. Multi-character operators (Member D fills in) ──────────────
+        # ── 6. Multi-character operators ──────────────────────────────────
         if ch in ("=", "!", ">", "<"):
-            self._consume_operator()      # Member D
+            self._consume_operator()
             return
 
-        # ── 7. Single-character tokens (Member A — implemented below) ─────
+        # ── 7. Single-character tokens (Member A) ─────────────────────────
         line = self._line
         if ch == "[":
             self.advance()
@@ -241,9 +215,9 @@ class _Lexer:
             return
         if ch == "*":
             # Contextual disambiguation (STAR vs ARITH_OP) is resolved by
-            # the parser, not the lexer.  The lexer always emits STAR here;
+            # the parser, not the lexer. The lexer always emits STAR here;
             # the parser interprets it as ARITH_OP inside <expr> context.
-            # See spec §3.4.1, Source 2.
+            # See spec §3.4.1.
             self.advance()
             self._emit(TokenType.STAR, "*", line)
             return
@@ -251,9 +225,13 @@ class _Lexer:
             self.advance()
             self._emit(TokenType.ARITH_OP, ch, line)
             return
+        if ch == ".":
+            self.advance()
+            self._emit(TokenType.DOT, ".", line)
+            return
 
-        # ── 8. Unknown character — delegate to Member D's error handler ───
-        self._unknown_char()              # Member D
+        # ── 8. Unknown character ───────────────────────────────────────────
+        self._unknown_char()
 
     # ── Main tokenisation loop ────────────────────────────────────────────
 
@@ -264,191 +242,7 @@ class _Lexer:
         self._emit(TokenType.EOF, "", self._line)
         return self._tokens
 
-    # ── Stubs for Members B, C, D ─────────────────────────────────────────
-    # These raise NotImplementedError until the respective subtasks are merged.
-    # Do NOT call these stubs in production; they are replaced by real code.
-
-    def _skip_whitespace(self) -> None:          # Member D
-        """Consume and skip horizontal/vertical whitespace.
-
-                Handles: space (U+0020), tab (U+0009), CR (U+000D), LF (U+000A)
-                The dispatcher will recall _next_token() after this returns, ensuring
-                the next token is processed correctly.
-
-                Per Def 2.1: "Whitespace separates tokens and is otherwise ignored."
-                Line tracking is automatic via advance() when consuming \\n.
-                """
-        while self.peek() in (" ", "\t", "\r", "\n"):
-            self.advance()
-
-    def _skip_comment(self) -> None:             # Member D
-        """Consume a line comment from # to end-of-line.
-
-                Per Def 2.2: A line comment begins with # and extends to the end
-                of the current line (terminated by \\n or EOF).
-
-                Comments are lexically equivalent to a single whitespace token,
-                so we skip silently without emitting a token.
-
-                The newline itself is NOT consumed here; it will be consumed
-                by _skip_whitespace() in the next _next_token() call.
-                This ensures the line counter is updated correctly.
-                """
-        # We know peek() == "#" when called
-        self.advance()  # consume the #
-
-        # Consume everything until we hit \n or EOF
-        while self.peek() is not None and self.peek() != "\n":
-            self.advance()
-
-        # Do NOT consume the \n; let _skip_whitespace() handle it
-        # so line tracking is consistent.
-
-    def _consume_operator(self) -> None:         # Member D
-        """Consume a multi-character comparison operator.
-
-                Dispatch order ensures we are called when peek() is one of: = ! > <
-
-                Maximal-munch rule: consume the longest valid token.
-                - ==, !=, >=, <= are two-character forms
-                - = is assignment (single-char, but only valid in specific contexts;
-                  the parser will validate this)
-
-                All emitted as TokenType.OP (comparison operators).
-                Assignment (=) is parsed as a comparison-like construct by the parser.
-                """
-        line = self._line
-        ch = self.peek()
-
-        # Lookahead: check if the next char forms a two-character operator
-        if ch == "=":
-            self.advance()
-            if self.peek() == "=":
-                self.advance()
-                self._emit(TokenType.OP, "==", line)
-            else:
-                # Single = — assignment operator
-                self._emit(TokenType.OP, "=", line)
-
-        elif ch == "!":
-            self.advance()
-            if self.peek() == "=":
-                self.advance()
-                self._emit(TokenType.OP, "!=", line)
-            else:
-                # Bare ! is not valid in PolarPandas
-                raise LexError(
-                    f"Unexpected character '!'; did you mean '!='?",
-                    line
-                )
-
-        elif ch == ">":
-            self.advance()
-            if self.peek() == "=":
-                self.advance()
-                self._emit(TokenType.OP, ">=", line)
-            else:
-                self._emit(TokenType.OP, ">", line)
-
-        elif ch == "<":
-            self.advance()
-            if self.peek() == "=":
-                self.advance()
-                self._emit(TokenType.OP, "<=", line)
-            else:
-                self._emit(TokenType.OP, "<", line)
-
-    def _unknown_char(self) -> None:             # Member D
-        """Handle an unrecognised character.
-
-                This is the fallback for any character that doesn't match
-                the first 7 categories in _next_token()'s dispatch.
-
-                Per Property 5.2 (Progress), we transition to an error state
-                with a helpful diagnostic message.
-                """
-        ch = self.peek()
-        line = self._line
-
-        # Provide context-specific suggestions
-        suggestions = {
-            "|": "chaining without | (use keywords like WHERE, FILTER)",
-            "&": "use AND for logical conjunction",
-            "^": "unexpected character; did you mean ^ operator?",
-            "~": "unexpected character",
-            "`": "backticks are not supported; use double quotes for strings",
-            "'": "single quotes not supported; use double quotes \"...\" for strings",
-            "@": "unexpected character (decorators not supported)",
-            "{": "braces not supported (use parentheses instead: (...))",
-            "}": "unexpected }; did you mean to close with )?",
-            ";": "semicolons not needed; use newlines or keywords to separate statements",
-        }
-
-        msg = suggestions.get(ch, f"unexpected character {ch!r}")
-        raise LexError(msg, line)
-
-    def _consume_word(self) -> None:             # Member B
-        """Consume a keyword, boolean, or identifier token.
-
-                A word is a sequence of alphanumeric characters and underscores,
-                starting with a letter or underscore.
-
-                Classification:
-                - Reserved keywords (case-insensitive): KW token type
-                - Boolean literals: true | false → BOOL token type
-                - Everything else: IDENT token type
-
-                Per Spec Def 2.6: "Boolean literals are case-insensitive."
-                Per Spec Def 2.2: Keywords are normalized to UPPER CASE.
-                """
-        line = self._line
-        start_pos = self._pos
-
-        # Consume the word: [a-zA-Z_][a-zA-Z0-9_]*
-        while self.peek() is not None and (self.peek().isalnum() or self.peek() == "_"):
-            self.advance()
-
-        word = self._source[start_pos:self._pos]
-
-        # Normalize to uppercase for keyword/boolean checking
-        word_upper = word.upper()
-
-        # Reserved keywords (Member B must maintain this list per spec §2.3)
-        reserved_keywords = {
-            "LOAD", "AS", "WHERE", "SELECT", "COLUMNS", "DROP",
-            "NULLS", "DUPLICATES", "FILTER", "SORT", "BY", "ASC", "DESC",
-            "FILL", "ENSURE", "PARSE", "LIMIT", "CLEAN", "IF", "THEN",
-            "ELSE", "AND", "OR", "NOT", "FOR", "EACH", "OVER", "IN",
-            "WITH", "TO", "FROM", "OF", "ON", "AT", "END", "CASE", "WHEN"
-        }
-
-        if word_upper in reserved_keywords:
-            self._emit(TokenType.KW, word_upper, line)
-        elif word_upper in ("TRUE", "FALSE"):
-            self._emit(TokenType.BOOL, word_upper, line)
-        else:
-            self._emit(TokenType.IDENT, word, line)
-
-    def _consume_string(self) -> None:           # Member C
-        raise NotImplementedError("Member C: _consume_string not yet implemented")
-
-    def _consume_number(self) -> None:           # Member C
-        raise NotImplementedError("Member C: _consume_number not yet implemented")
-
-    def _consume_loopvar(self) -> None:          # Member C
-        raise NotImplementedError("Member C: _consume_loopvar not yet implemented")
-        raise NotImplementedError("Member D: _skip_whitespace not yet implemented")
-
-    def _skip_comment(self) -> None:             # Member D
-        raise NotImplementedError("Member D: _skip_comment not yet implemented")
-
-    def _consume_operator(self) -> None:         # Member D
-        raise NotImplementedError("Member D: _consume_operator not yet implemented")
-
-    def _unknown_char(self) -> None:             # Member D
-        raise NotImplementedError("Member D: _unknown_char not yet implemented")
-
-    # ── KEYWORDS set (Member B) ──────────────────────────────────────────
+    # ── KEYWORDS set (Member B) ───────────────────────────────────────────
     # 66 reserved words (all stored UPPERCASE). Includes v1.1 additions:
     # IF, THEN, ELSE, END, FOR, EACH, OVER, DO, EXISTS, ROWCOUNT, NULLCOUNT.
 
@@ -490,16 +284,17 @@ class _Lexer:
         "USING", "ROWS",
     }
 
-    def _consume_word(self) -> None:             # Member B
+    # ── Member B: words ───────────────────────────────────────────────────
+
+    def _consume_word(self) -> None:
         """Read the longest [a-zA-Z_][a-zA-Z0-9_]* sequence, then classify:
         - ``true`` / ``false`` (case-insensitive) → BOOL token
         - word found in KEYWORDS (case-insensitive) → KW token (stored UPPER)
         - anything else → IDENT token (original casing preserved)
         """
         start_line = self._line
-        start_pos = self._pos
+        start_pos  = self._pos
 
-        # Consume the full word using maximal munch
         while not self.at_end():
             ch = self.peek()
             if ch is not None and (ch.isalnum() or ch == "_"):
@@ -507,39 +302,33 @@ class _Lexer:
             else:
                 break
 
-        word = self._source[start_pos:self._pos]
+        word  = self._source[start_pos:self._pos]
         upper = word.upper()
 
-        # Booleans: true / false (case-insensitive) → BOOL
         if upper in ("TRUE", "FALSE"):
             self._emit(TokenType.BOOL, upper, start_line)
-        # Keywords: case-insensitive match against KEYWORDS set → KW
         elif upper in self.KEYWORDS:
             self._emit(TokenType.KW, upper, start_line)
-        # Everything else → IDENT (original casing)
         else:
             self._emit(TokenType.IDENT, word, start_line)
 
-    def _consume_string(self) -> None:           # Member C
+    # ── Member C: strings, numbers, loop variables ────────────────────────
+
+    def _consume_string(self) -> None:
         start_line = self._line
         if self.peek() != '"':
             raise LexError("String literal must start with double quote", start_line)
 
-        self.advance()  # opening quote
+        self.advance()  # opening "
         chars: list[str] = []
-        escapes = {
-            '"': '"',
-            "\\": "\\",
-            "n": "\n",
-            "t": "\t",
-        }
+        escapes = {'"': '"', "\\": "\\", "n": "\n", "t": "\t"}
 
         while True:
             ch = self.peek()
             if ch is None or ch == "\n":
                 raise LexError("Unterminated string literal", start_line)
             if ch == '"':
-                self.advance()
+                self.advance()  # closing "
                 self._emit(TokenType.STRING, f'"{"".join(chars)}"', start_line)
                 return
             if ch == "\\":
@@ -552,18 +341,18 @@ class _Lexer:
                 self.advance()
                 chars.append(escapes[esc])
                 continue
-
             chars.append(self.advance())
 
-    def _consume_number(self) -> None:           # Member C
+    def _consume_number(self) -> None:
         start_line = self._line
-        start_pos = self._pos
+        start_pos  = self._pos
 
         while (self.peek() or "").isdigit():
             self.advance()
 
+        # Check for decimal point followed by more digits → FLOAT
         if self.peek() == "." and (self.peek(1) or "").isdigit():
-            self.advance()
+            self.advance()  # consume "."
             while (self.peek() or "").isdigit():
                 self.advance()
             self._emit(TokenType.FLOAT, self._source[start_pos:self._pos], start_line)
@@ -571,12 +360,12 @@ class _Lexer:
 
         self._emit(TokenType.INTEGER, self._source[start_pos:self._pos], start_line)
 
-    def _consume_loopvar(self) -> None:          # Member C
+    def _consume_loopvar(self) -> None:
         start_line = self._line
         if self.peek() != "$":
             raise LexError("Loop variable must start with '$'", start_line)
 
-        self.advance()  # $
+        self.advance()  # consume "$"
         first = self.peek()
         if first is None or not (first.isalpha() or first == "_"):
             raise LexError("'$' must be followed by a letter or underscore", start_line)
@@ -591,19 +380,100 @@ class _Lexer:
 
         self._emit(TokenType.LOOPVAR, f"${self._source[start_pos:self._pos]}", start_line)
 
+    # ── Member D: whitespace, comments, operators, errors ─────────────────
+
+    def _skip_whitespace(self) -> None:
+        """Consume and skip horizontal/vertical whitespace.
+
+        Handles: space (U+0020), tab (U+0009), CR (U+000D), LF (U+000A).
+        Line tracking is automatic via advance() when consuming \\n.
+        """
+        while self.peek() in (" ", "\t", "\r", "\n"):
+            self.advance()
+
+    def _skip_comment(self) -> None:
+        """Consume a line comment from # to end-of-line (exclusive).
+
+        The newline itself is NOT consumed here; _skip_whitespace() handles
+        it on the next dispatch so the line counter is updated correctly.
+        """
+        self.advance()  # consume "#"
+        while self.peek() is not None and self.peek() != "\n":
+            self.advance()
+
+    def _consume_operator(self) -> None:
+        """Consume a comparison operator using maximal-munch.
+
+        Two-character forms: == != >= <=
+        Single-character forms: = > <
+        Bare ! (not followed by =) raises LexError.
+        """
+        line = self._line
+        ch   = self.peek()
+
+        if ch == "=":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, "==", line)
+            else:
+                self._emit(TokenType.OP, "=", line)
+
+        elif ch == "!":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, "!=", line)
+            else:
+                raise LexError("Unexpected character '!'; did you mean '!='?", line)
+
+        elif ch == ">":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, ">=", line)
+            else:
+                self._emit(TokenType.OP, ">", line)
+
+        elif ch == "<":
+            self.advance()
+            if self.peek() == "=":
+                self.advance()
+                self._emit(TokenType.OP, "<=", line)
+            else:
+                self._emit(TokenType.OP, "<", line)
+
+    def _unknown_char(self) -> None:
+        """Raise a LexError for any character not handled by the dispatcher."""
+        ch   = self.peek()
+        line = self._line
+
+        suggestions = {
+            "|": "chaining without | (use keywords like WHERE, FILTER)",
+            "&": "use AND for logical conjunction",
+            "^": "unexpected character; did you mean ^ operator?",
+            "~": "unexpected character",
+            "`": "backticks are not supported; use double quotes for strings",
+            "'": "single quotes not supported; use double quotes \"...\" for strings",
+            "@": "unexpected character (decorators not supported)",
+            "{": "braces not supported (use parentheses instead: (...))",
+            "}": "unexpected }; did you mean to close with )?",
+            ";": "semicolons not needed; use newlines or keywords to separate statements",
+        }
+
+        msg = suggestions.get(ch, f"unexpected character {ch!r}")
+        raise LexError(msg, line)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. PUBLIC ENTRY POINT
-#    This is the function the Parser calls.  It is the only public symbol
-#    that consumers of this module need to import.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tokenize(source: str) -> list[Token]:
     """Lex a PolarPandas source string into an ordered list of tokens.
 
     The final token is always ``Token(TokenType.EOF, "", <last_line>)``.
-    Raises ``LexError`` on the first unrecognised character or malformed
-    token (Member D will extend this to collect-all mode).
+    Raises ``LexError`` on any unrecognised character or malformed token.
 
     Parameters
     ----------
