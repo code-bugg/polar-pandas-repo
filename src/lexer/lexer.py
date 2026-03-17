@@ -353,13 +353,75 @@ class _Lexer:
             self._emit(TokenType.IDENT, word, start_line)
 
     def _consume_string(self) -> None:           # Member C
-        raise NotImplementedError("Member C: _consume_string not yet implemented")
+        start_line = self._line
+        if self.peek() != '"':
+            raise LexError("String literal must start with double quote", start_line)
+
+        self.advance()  # opening quote
+        chars: list[str] = []
+        escapes = {
+            '"': '"',
+            "\\": "\\",
+            "n": "\n",
+            "t": "\t",
+        }
+
+        while True:
+            ch = self.peek()
+            if ch is None or ch == "\n":
+                raise LexError("Unterminated string literal", start_line)
+            if ch == '"':
+                self.advance()
+                self._emit(TokenType.STRING, f'"{"".join(chars)}"', start_line)
+                return
+            if ch == "\\":
+                self.advance()
+                esc = self.peek()
+                if esc is None or esc == "\n":
+                    raise LexError("Unterminated string literal", start_line)
+                if esc not in escapes:
+                    raise LexError(f"Invalid escape sequence '\\{esc}'", self._line)
+                self.advance()
+                chars.append(escapes[esc])
+                continue
+
+            chars.append(self.advance())
 
     def _consume_number(self) -> None:           # Member C
-        raise NotImplementedError("Member C: _consume_number not yet implemented")
+        start_line = self._line
+        start_pos = self._pos
+
+        while (self.peek() or "").isdigit():
+            self.advance()
+
+        if self.peek() == "." and (self.peek(1) or "").isdigit():
+            self.advance()
+            while (self.peek() or "").isdigit():
+                self.advance()
+            self._emit(TokenType.FLOAT, self._source[start_pos:self._pos], start_line)
+            return
+
+        self._emit(TokenType.INTEGER, self._source[start_pos:self._pos], start_line)
 
     def _consume_loopvar(self) -> None:          # Member C
-        raise NotImplementedError("Member C: _consume_loopvar not yet implemented")
+        start_line = self._line
+        if self.peek() != "$":
+            raise LexError("Loop variable must start with '$'", start_line)
+
+        self.advance()  # $
+        first = self.peek()
+        if first is None or not (first.isalpha() or first == "_"):
+            raise LexError("'$' must be followed by a letter or underscore", start_line)
+
+        start_pos = self._pos
+        while True:
+            ch = self.peek()
+            if ch is not None and (ch.isalnum() or ch == "_"):
+                self.advance()
+            else:
+                break
+
+        self._emit(TokenType.LOOPVAR, f"${self._source[start_pos:self._pos]}", start_line)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
