@@ -437,6 +437,159 @@ class _Lexer:
 
     def _consume_loopvar(self) -> None:          # Member C
         raise NotImplementedError("Member C: _consume_loopvar not yet implemented")
+        raise NotImplementedError("Member D: _skip_whitespace not yet implemented")
+
+    def _skip_comment(self) -> None:             # Member D
+        raise NotImplementedError("Member D: _skip_comment not yet implemented")
+
+    def _consume_operator(self) -> None:         # Member D
+        raise NotImplementedError("Member D: _consume_operator not yet implemented")
+
+    def _unknown_char(self) -> None:             # Member D
+        raise NotImplementedError("Member D: _unknown_char not yet implemented")
+
+    # ── KEYWORDS set (Member B) ──────────────────────────────────────────
+    # 66 reserved words (all stored UPPERCASE). Includes v1.1 additions:
+    # IF, THEN, ELSE, END, FOR, EACH, OVER, DO, EXISTS, ROWCOUNT, NULLCOUNT.
+
+    KEYWORDS: set[str] = {
+        # ── I/O & inspection ──────────────────────────────────────────────
+        "LOAD", "EXPORT", "PREVIEW", "INFO", "DESCRIBE",
+        # ── Data source / target ──────────────────────────────────────────
+        "AS", "TO", "FROM", "IN", "INTO",
+        # ── Selection & filtering ─────────────────────────────────────────
+        "SELECT", "COLUMNS", "FILTER", "WHERE",
+        # ── Cleaning ──────────────────────────────────────────────────────
+        "DROP", "NULLS", "DUPLICATES", "FILL", "WITH",
+        # ── Column operations ─────────────────────────────────────────────
+        "CAST", "ADD", "COLUMN", "RENAME", "SORT", "BY",
+        # ── Aggregation ───────────────────────────────────────────────────
+        "GROUP", "COUNT", "JOIN",
+        # ── Sorting modifiers ─────────────────────────────────────────────
+        "ASC", "DESC",
+        # ── Plot ──────────────────────────────────────────────────────────
+        "PLOT", "TYPE", "X", "Y", "TITLE", "SAVE",
+        # ── Engine ────────────────────────────────────────────────────────
+        "SET", "ENGINE",
+        # ── Aggregation functions ─────────────────────────────────────────
+        "SUM", "MEAN", "MIN", "MAX", "MEDIAN",
+        # ── Data types ────────────────────────────────────────────────────
+        "INT", "FLOAT", "STR", "BOOL",
+        # ── Join types ────────────────────────────────────────────────────
+        "INNER", "LEFT", "RIGHT", "OUTER", "ON",
+        # ── Logical operators (in conditions) ─────────────────────────────
+        "AND", "OR", "NOT",
+        # ── Control flow (v1.1) ───────────────────────────────────────────
+        "IF", "THEN", "ELSE", "END",
+        "FOR", "EACH", "OVER", "DO",
+        # ── Meta-condition keywords (v1.1) ────────────────────────────────
+        "EXISTS", "ROWCOUNT", "NULLCOUNT",
+        # ── Plot types ────────────────────────────────────────────────────
+        "BAR", "LINE", "SCATTER", "HIST",
+        # ── Miscellaneous ─────────────────────────────────────────────────
+        "USING", "ROWS",
+    }
+
+    def _consume_word(self) -> None:             # Member B
+        """Read the longest [a-zA-Z_][a-zA-Z0-9_]* sequence, then classify:
+        - ``true`` / ``false`` (case-insensitive) → BOOL token
+        - word found in KEYWORDS (case-insensitive) → KW token (stored UPPER)
+        - anything else → IDENT token (original casing preserved)
+        """
+        start_line = self._line
+        start_pos = self._pos
+
+        # Consume the full word using maximal munch
+        while not self.at_end():
+            ch = self.peek()
+            if ch is not None and (ch.isalnum() or ch == "_"):
+                self.advance()
+            else:
+                break
+
+        word = self._source[start_pos:self._pos]
+        upper = word.upper()
+
+        # Booleans: true / false (case-insensitive) → BOOL
+        if upper in ("TRUE", "FALSE"):
+            self._emit(TokenType.BOOL, upper, start_line)
+        # Keywords: case-insensitive match against KEYWORDS set → KW
+        elif upper in self.KEYWORDS:
+            self._emit(TokenType.KW, upper, start_line)
+        # Everything else → IDENT (original casing)
+        else:
+            self._emit(TokenType.IDENT, word, start_line)
+
+    def _consume_string(self) -> None:           # Member C
+        start_line = self._line
+        if self.peek() != '"':
+            raise LexError("String literal must start with double quote", start_line)
+
+        self.advance()  # opening quote
+        chars: list[str] = []
+        escapes = {
+            '"': '"',
+            "\\": "\\",
+            "n": "\n",
+            "t": "\t",
+        }
+
+        while True:
+            ch = self.peek()
+            if ch is None or ch == "\n":
+                raise LexError("Unterminated string literal", start_line)
+            if ch == '"':
+                self.advance()
+                self._emit(TokenType.STRING, f'"{"".join(chars)}"', start_line)
+                return
+            if ch == "\\":
+                self.advance()
+                esc = self.peek()
+                if esc is None or esc == "\n":
+                    raise LexError("Unterminated string literal", start_line)
+                if esc not in escapes:
+                    raise LexError(f"Invalid escape sequence '\\{esc}'", self._line)
+                self.advance()
+                chars.append(escapes[esc])
+                continue
+
+            chars.append(self.advance())
+
+    def _consume_number(self) -> None:           # Member C
+        start_line = self._line
+        start_pos = self._pos
+
+        while (self.peek() or "").isdigit():
+            self.advance()
+
+        if self.peek() == "." and (self.peek(1) or "").isdigit():
+            self.advance()
+            while (self.peek() or "").isdigit():
+                self.advance()
+            self._emit(TokenType.FLOAT, self._source[start_pos:self._pos], start_line)
+            return
+
+        self._emit(TokenType.INTEGER, self._source[start_pos:self._pos], start_line)
+
+    def _consume_loopvar(self) -> None:          # Member C
+        start_line = self._line
+        if self.peek() != "$":
+            raise LexError("Loop variable must start with '$'", start_line)
+
+        self.advance()  # $
+        first = self.peek()
+        if first is None or not (first.isalpha() or first == "_"):
+            raise LexError("'$' must be followed by a letter or underscore", start_line)
+
+        start_pos = self._pos
+        while True:
+            ch = self.peek()
+            if ch is not None and (ch.isalnum() or ch == "_"):
+                self.advance()
+            else:
+                break
+
+        self._emit(TokenType.LOOPVAR, f"${self._source[start_pos:self._pos]}", start_line)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
