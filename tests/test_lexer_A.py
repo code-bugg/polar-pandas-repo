@@ -5,7 +5,7 @@ Unit tests for Member A's lexer subtask:
   - TokenType enum completeness
   - Token dataclass behaviour
   - LexError construction
-  - Single-character token dispatch ([ ] , * + - / %)
+  - Single-character token dispatch ([ ] , * + - / % .)
   - at_end() and peek() cursor behaviour
   - EOF sentinel is always last token
 
@@ -24,14 +24,15 @@ from lexer.lexer import TokenType, Token, LexError, tokenize, _Lexer
 
 class TestTokenTypeEnum:
 
-    def test_has_exactly_14_members(self):
-        assert len(TokenType) == 14
+    def test_has_exactly_15_members(self):
+        # 14 original + DOT (member access separator, added with df.column support)
+        assert len(TokenType) == 15
 
     def test_all_expected_members_exist(self):
         expected = {
             "KW", "IDENT", "STRING", "INTEGER", "FLOAT", "BOOL",
             "OP", "ARITH_OP", "LBRACKET", "RBRACKET", "COMMA",
-            "STAR", "LOOPVAR", "EOF",
+            "STAR", "LOOPVAR", "DOT", "EOF",
         }
         actual = {m.name for m in TokenType}
         assert actual == expected
@@ -175,8 +176,6 @@ class TestLexerCursor:
 
 def _patch_stubs(lex: _Lexer) -> None:
     """Monkeypatch all stubs to skip silently so we can test single-char tokens."""
-    def _noop(self=None):
-        raise LexError("unexpected in this test", lex._line)
     lex._skip_whitespace = lambda: None   # type: ignore
     lex._skip_comment    = lambda: None   # type: ignore
 
@@ -229,6 +228,11 @@ class TestSingleCharTokens:
         assert tokens[0].type  == TokenType.ARITH_OP
         assert tokens[0].value == "%"
 
+    def test_dot(self):
+        tokens = self._lex_single(".")
+        assert tokens[0].type  == TokenType.DOT
+        assert tokens[0].value == "."
+
     def test_single_char_line_number(self):
         tokens = self._lex_single(",")
         assert tokens[0].line == 1
@@ -254,6 +258,18 @@ class TestSingleCharTokens:
             TokenType.RBRACKET,
             TokenType.EOF,
         ]
+
+    def test_dot_line_number(self):
+        tokens = self._lex_single(".")
+        assert tokens[0].line == 1
+
+    def test_dot_does_not_consume_following_char(self):
+        # ".[" should yield DOT then LBRACKET, not a single token
+        lex = _Lexer(".[")
+        _patch_stubs(lex)
+        tokens = lex._tokenize_all()
+        assert tokens[0].type == TokenType.DOT
+        assert tokens[1].type == TokenType.LBRACKET
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,3 +330,19 @@ class TestDispatcherRouting:
 
     def test_operator_routes_to_consume_operator(self):
         assert self._lex_with_sentinel(">=", "_consume_operator")
+
+    def test_dot_does_not_route_to_consume_number(self):
+        # A bare "." (not preceded by digits) must NOT enter _consume_number.
+        # It is handled directly in the dispatcher as DOT.
+        called = []
+        lex = _Lexer(".")
+        _patch_stubs(lex)
+
+        original = lex._consume_number
+        def sentinel():
+            called.append(True)
+            original()
+        lex._consume_number = sentinel  # type: ignore
+
+        lex._tokenize_all()
+        assert not called, "_consume_number should not be called for a bare '.'"
