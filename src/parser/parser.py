@@ -890,6 +890,14 @@ class _Parser:
             elif tok.type is TokenType.STRING:
                 raw = self.consume().value
                 cols.append(raw[1:-1] if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"' else raw)
+            elif tok.type is TokenType.KW:
+                # Accept keywords as column names (they might be case-insensitive column names)
+                cols.append(self.consume().value.lower())
+            elif tok.type is TokenType.LOOPVAR:
+                # Accept loop variable in column list (like $col)
+                loopvar_val = self.consume().value
+                loopvar_name = loopvar_val[1:] if loopvar_val.startswith("$") else loopvar_val
+                cols.append(loopvar_name)
             else:
                 raise ParseError(
                     f"Expected column name, got {tok.type.name} {tok.value!r}",
@@ -1069,7 +1077,20 @@ class _Parser:
     def parse_cast(self) -> AstCast:
         """CAST <col> IN <name> TO <type>"""
         start = self.expect_kw("CAST")
-        col_tok = self.expect_ident()
+        # Column can be IDENT or LOOPVAR
+        col_tok = self.peek()
+        if col_tok.type == TokenType.IDENT:
+            col_tok = self.consume()
+        elif col_tok.type == TokenType.LOOPVAR:
+            col_tok = self.consume()
+            # Remove leading $ from loopvar
+            col_name = col_tok.value[1:] if col_tok.value.startswith("$") else col_tok.value
+            col_tok = type('obj', (object,), {'value': col_name})()
+        else:
+            raise ParseError(
+                f"Expected column name or loop variable, got {col_tok.type.name} {col_tok.value!r}",
+                col_tok.line,
+            )
         self.expect_kw("IN")
         name_tok = self.expect_ident()
         self.expect_kw("TO")
@@ -1230,16 +1251,467 @@ class _Parser:
         )
 
     # Member D
-    def parse_group(self)       -> AstGroup:       raise NotImplementedError("Member D: parse_group")
-    def parse_count(self)       -> AstCount:       raise NotImplementedError("Member D: parse_count")
-    def parse_join(self)        -> AstJoin:        raise NotImplementedError("Member D: parse_join")
-    def parse_plot(self)        -> AstPlot:        raise NotImplementedError("Member D: parse_plot")
-    def parse_plot_opts(self)   -> dict:           raise NotImplementedError("Member D: parse_plot_opts")
-    def parse_condition(self)   -> Condition:      raise NotImplementedError("Member D: parse_condition")
-    def parse_cond_chain(self)  -> Condition:      raise NotImplementedError("Member D: parse_cond_chain")
-    def parse_meta_cond(self)   -> Condition:      raise NotImplementedError("Member D: parse_meta_cond")
-    def parse_if(self)          -> AstIf:          raise NotImplementedError("Member D: parse_if")
-    def parse_for(self)         -> AstFor:         raise NotImplementedError("Member D: parse_for")
+    def parse_group(self)       -> AstGroup:
+        """Parse: GROUP <name> BY <col> USING <agg> ON <col> [AS <result>]
+
+           Examples:
+               GROUP sales BY region USING sum ON amount
+               GROUP data BY date USING count ON id AS monthly_totals
+
+           Per Spec §4.2: Aggregation statement for grouping and reducing data.
+           """
+        start_tok = self.expect_kw("GROUP")
+        name_tok = self.expect_ident()  # Dataframe name
+
+        self.expect_kw("BY")
+        by_tok = self.expect_ident()  # Column to group by
+
+        self.expect_kw("USING")
+        # Aggregation function can be keyword or identifier (sum, avg, count, mean, etc.)
+        agg_tok = self.peek()
+        if agg_tok.type in (TokenType.IDENT, TokenType.KW):
+            agg_tok = self.consume()
+        else:
+            raise ParseError(
+                f"Expected aggregation function name, got {agg_tok.type.name} {agg_tok.value!r}",
+                agg_tok.line,
+            )
+
+        self.expect_kw("ON")
+        on_tok = self.expect_ident()  # Column to aggregate on
+
+        result_name = None
+        if self.next_is_kw("AS"):
+            self.consume()
+            result_name = self.expect_ident().value
+
+        return AstGroup(
+            name=name_tok.value,
+            by=by_tok.value,
+            agg=agg_tok.value.lower(),
+            on=on_tok.value,
+            result=result_name,
+            line=start_tok.line
+        )
+
+
+    def parse_count(self)       -> AstCount:
+        """Parse: COUNT ROWS IN <name> [AS <result>]
+
+        Examples:
+            COUNT ROWS IN df
+            COUNT ROWS IN df AS total_rows
+
+        Per Spec §4.3: Row counting operation.
+        """
+        start_tok = self.expect_kw("COUNT")
+        self.expect_kw("ROWS")
+        self.expect_kw("IN")
+        name_tok = self.expect_ident()  # Dataframe identifier
+
+        result_name = None
+        if self.next_is_kw("AS"):
+            self.consume()
+            result_name = self.expect_ident().value
+
+        return AstCount(
+            name=name_tok.value,
+            result=result_name,
+            line=start_tok.line
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # JOIN STATEMENT
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def parse_join(self)        -> AstJoin:
+        """Parse: JOIN <left> WITH <right> ON <col> [<how>] [AS <result>]
+
+           Examples:
+               JOIN df1 WITH df2 ON id
+               JOIN customers WITH orders ON customer_id LEFT AS joined_data
+
+           Join types: INNER (default), LEFT, RIGHT, OUTER
+
+           Per Spec §4.4: Relational join operation for combining dataframes.
+           """
+        start_tok = self.expect_kw("JOIN")
+        left_tok = self.expect_ident()
+        self.expect_kw("WITH")
+        right_tok = self.expect_ident()
+        self.expect_kw("ON")
+        key_tok = self.expect_ident()
+
+        join_type = "INNER"  # default
+        result_name = None
+
+        # Optional join type (INNER, LEFT, RIGHT, OUTER)
+        if self.next_is_kw("INNER", "LEFT", "RIGHT", "OUTER"):
+            join_type = self.consume().value
+
+        # Optional result name
+        if self.next_is_kw("AS"):
+            self.consume()
+            result_name = self.expect_ident().value
+
+        return AstJoin(
+            left=left_tok.value,
+            right=right_tok.value,
+            on=key_tok.value,
+            how=join_type,
+            result=result_name,
+            line=start_tok.line
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # PLOT STATEMENT WITH OPTIONAL ATTRIBUTES
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def parse_plot(self)        -> AstPlot:
+        """Parse: PLOT <name> TYPE <kind> X <col> Y <col> [TITLE str] [SAVE file]
+
+            Examples:
+                PLOT sales TYPE bar X month Y revenue
+                PLOT data TYPE scatter X price Y quantity TITLE "Price vs Qty" SAVE "plot.png"
+
+            Plot types: BAR, LINE, SCATTER, HIST, etc.
+            X and Y columns determine axes; TITLE and SAVE are optional.
+
+            Per Spec §4.5: Visualization statement with flexible option parsing.
+            """
+        start_tok = self.expect_kw("PLOT")
+        name_tok = self.expect_ident()
+        self.expect_kw("TYPE")
+        # Plot type can be keyword or identifier (bar, line, scatter, hist, etc.)
+        kind_tok = self.peek()
+        if kind_tok.type in (TokenType.IDENT, TokenType.KW):
+            kind_tok = self.consume()
+        else:
+            raise ParseError(
+                f"Expected plot type name, got {kind_tok.type.name} {kind_tok.value!r}",
+                kind_tok.line,
+            )
+
+        x_col = None
+        y_col = None
+        title = None
+        save = None
+
+        # Parse X, Y, TITLE, SAVE in any order (zero or more times each)
+        while self.next_is_kw("X", "Y", "TITLE", "SAVE"):
+            kw_tok = self.consume()
+            kw = kw_tok.value
+
+            if kw == "X":
+                # Column name can be IDENT or KW
+                col_tok = self.peek()
+                if col_tok.type in (TokenType.IDENT, TokenType.KW):
+                    col_val = self.consume().value
+                    x_col = col_val.lower() if col_tok.type is TokenType.KW else col_val
+                else:
+                    raise ParseError(
+                        f"Expected column name for X, got {col_tok.type.name} {col_tok.value!r}",
+                        col_tok.line,
+                    )
+            elif kw == "Y":
+                # Column name can be IDENT or KW
+                col_tok = self.peek()
+                if col_tok.type in (TokenType.IDENT, TokenType.KW):
+                    col_val = self.consume().value
+                    y_col = col_val.lower() if col_tok.type is TokenType.KW else col_val
+                else:
+                    raise ParseError(
+                        f"Expected column name for Y, got {col_tok.type.name} {col_tok.value!r}",
+                        col_tok.line,
+                    )
+            elif kw == "TITLE":
+                title_tok = self.expect_string()
+                # Strip surrounding quotes
+                raw = title_tok.value
+                title = raw[1:-1] if len(raw) >= 2 and raw[0] == '"' else raw
+            elif kw == "SAVE":
+                save_tok = self.expect_string()
+                raw = save_tok.value
+                save = raw[1:-1] if len(raw) >= 2 and raw[0] == '"' else raw
+
+        return AstPlot(
+            name=name_tok.value,
+            kind=kind_tok.value.lower(),
+            x=x_col,
+            y=y_col,
+            title=title,
+            save=save,
+            line=start_tok.line
+        )
+
+
+    def parse_plot_opts(self)   -> dict:
+        """Helper: Parse zero-or-more plot option keyword-value pairs.
+
+        Returns a dict mapping option name to value.
+        Recognized options: X, Y, TITLE, SAVE
+
+        This method is optional; parse_plot() above integrates it inline.
+        Provided here for reference if you need to factor out the loop.
+        """
+        opts = {}
+        while self.next_is_kw("X", "Y", "TITLE", "SAVE"):
+            kw_tok = self.consume()
+            kw = kw_tok.value
+
+            if kw in ("X", "Y"):
+                opts[kw] = self.expect_ident().value
+            elif kw == "TITLE":
+                title_tok = self.expect_string()
+                raw = title_tok.value
+                opts["TITLE"] = raw[1:-1] if len(raw) >= 2 and raw[0] == '"' else raw
+            elif kw == "SAVE":
+                save_tok = self.expect_string()
+                raw = save_tok.value
+                opts["SAVE"] = raw[1:-1] if len(raw) >= 2 and raw[0] == '"' else raw
+
+        return opts
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # CONDITION PARSING WITH PRECEDENCE CLIMBING
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def parse_condition(self)   -> Condition:
+        """Parse a condition with AND/OR precedence climbing.
+
+            Precedence (per Spec §3.4):
+                1. OR (lowest precedence)
+                2. AND
+                3. Atoms (comparisons, IN, BETWEEN, NULL) (highest)
+
+            Uses precedence climbing to handle:
+                a > 5 AND b < 10 OR c == "active"
+
+            Parses as: ((a > 5) AND (b < 10)) OR (c == "active")
+
+            Entry point for all conditions.
+            """
+        return self.parse_cond_or()
+
+    def parse_cond_or(self) -> Condition:
+        """Parse OR level (lowest precedence, left-associative).
+
+        or_expr := and_expr (OR and_expr)*
+        """
+        left = self.parse_cond_chain()
+
+        while self.next_is_kw("OR"):
+            or_tok = self.consume()
+            right = self.parse_cond_chain()
+            left = CondOr(left=left, right=right, line=or_tok.line)
+
+        return left
+
+    def parse_cond_chain(self)  -> Condition:
+        """Parse AND level (higher precedence than OR, left-associative).
+
+            and_expr := cond_atom (AND cond_atom)*
+            """
+        left = self.parse_cond_atom()
+
+        while self.next_is_kw("AND"):
+            and_tok = self.consume()
+            right = self.parse_cond_atom()
+            left = CondAnd(left=left, right=right, line=and_tok.line)
+
+        return left
+
+    def parse_cond_atom(self) -> Condition:
+        """Parse a condition atom (leaf condition).
+
+        Handles:
+            - Comparisons: <expr> <op> <expr>  (== != > < >= <=)
+            - IN:          <col> IN [v1, v2, ...]
+            - BETWEEN:     <col> BETWEEN low AND high
+            - NULL:        <col> IS NULL | IS NOT NULL
+
+        For now, we implement simple comparisons and IN.
+        BETWEEN and NULL require more lookahead.
+        """
+        # Try to parse as a comparison or IN expression
+        # Start by parsing the left-hand side (an expression or column)
+
+        start_line = self.peek().line
+
+        # Peek ahead to distinguish between comparison types
+        # For simplicity, we'll parse comparisons fully here.
+
+        # Check for parenthesized condition: ( condition )
+        if self.next_is(TokenType.LBRACKET):
+            # Note: in PolarPandas, parentheses use LBRACKET (for now, clarify spec)
+            # For now, we'll skip parenthesized conditions; add if needed.
+            pass
+
+        # Parse left-hand side: usually a column reference
+        left_expr = self.parse_expr()
+
+        tok = self.peek()
+
+        # Check for comparison operator
+        if tok.type is TokenType.OP:
+            op_tok = self.consume()
+            right_expr = self.parse_expr()
+            return CondCompare(left=left_expr, op=op_tok.value, right=right_expr, line=start_line)
+
+        # Check for IN
+        if tok.type is TokenType.KW and tok.value == "IN":
+            self.consume()  # consume IN
+            values = self.parse_value_list()
+            # left_expr should be a column ref
+            if not isinstance(left_expr, ExprColRef):
+                raise ParseError("IN condition requires a column reference on the left", start_line)
+            return CondIn(col=left_expr, values=values, line=start_line)
+
+        # Check for IS NULL / IS NOT NULL
+        if tok.type is TokenType.KW and tok.value == "IS":
+            self.consume()  # consume IS
+            if self.next_is_kw("NOT"):
+                self.consume()
+                self.expect_kw("NULL")
+                if not isinstance(left_expr, ExprColRef):
+                    raise ParseError("IS NULL requires a column reference", start_line)
+                return CondNull(col=left_expr, is_not=True, line=start_line)
+            else:
+                self.expect_kw("NULL")
+                if not isinstance(left_expr, ExprColRef):
+                    raise ParseError("IS NULL requires a column reference", start_line)
+                return CondNull(col=left_expr, is_not=False, line=start_line)
+
+        # Check for BETWEEN
+        if self.next_is_kw("BETWEEN"):
+            self.consume()  # consume BETWEEN
+            low_val = self.parse_value()
+            self.expect_kw("AND")
+            high_val = self.parse_value()
+            if not isinstance(left_expr, ExprColRef):
+                raise ParseError("BETWEEN requires a column reference", start_line)
+            return CondBetween(col=left_expr, low=low_val, high=high_val, line=start_line)
+
+        raise ParseError(
+            f"Expected comparison operator, IN, IS, or BETWEEN, got {tok.type.name} {tok.value!r}",
+            tok.line,
+        )
+
+    def parse_meta_cond(self)   -> Condition:
+        """Alias for parse_condition() (entry point with AND/OR climbing).
+
+          This method is optional; parse_condition() above is the main entry point.
+          Provided for reference if you want to separate concerns.
+          """
+        return self.parse_condition()
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # CONTROL FLOW STATEMENTS
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    def parse_if(self)          -> AstIf:
+        """Parse: IF <meta_cond> THEN <body> [ELSE <body>] END
+
+        Examples:
+            IF df.amount > 100 THEN
+                FILTER df WHERE amount >= 100
+            END
+
+            IF status == "active" THEN
+                ADD COLUMN df AS active_flag
+            ELSE
+                ADD COLUMN df AS inactive_flag
+            END
+
+        Per Spec §5: Control flow for conditional execution.
+        """
+        start_tok = self.expect_kw("IF")
+
+        # Parse the guard condition
+        condition = self.parse_meta_cond()
+
+        self.expect_kw("THEN")
+
+        # Parse THEN body: statements until ELSE or END
+        then_body: list[ASTNode] = []
+        while not self.next_is_kw("ELSE", "END"):
+            if self.at_end():
+                raise ParseError("Expected ELSE or END after THEN body", self.peek().line)
+            then_body.append(self.parse_statement())
+
+        else_body: list[ASTNode] = []
+
+        # Optional ELSE clause
+        if self.next_is_kw("ELSE"):
+            self.consume()  # consume ELSE
+            while not self.next_is_kw("END"):
+                if self.at_end():
+                    raise ParseError("Expected END after ELSE body", self.peek().line)
+                else_body.append(self.parse_statement())
+
+        self.expect_kw("END")
+
+        return AstIf(
+            condition=condition,
+            then_body=then_body,
+            else_body=else_body,
+            line=start_tok.line
+        )
+
+    def parse_for(self)         -> AstFor:
+        """Parse: FOR EACH $var OVER [col, ...] DO <body> END
+
+            Examples:
+                FOR EACH $col OVER [amount, revenue, sales] DO
+                    CAST $col IN df TO FLOAT
+                END
+
+                FOR EACH $column OVER [name, email] DO
+                    CLEAN $column
+                END
+
+            Loop variable ($var) is captured as LOOPVAR token.
+            Column list is static; body statements reference $var.
+
+            Per Spec §5: Control flow for iterating over columns.
+            """
+        start_tok = self.expect_kw("FOR")
+        self.expect_kw("EACH")
+
+        # Expect a LOOPVAR token: $identifier
+        loopvar_tok = self.peek()
+        if loopvar_tok.type is not TokenType.LOOPVAR:
+            raise ParseError(
+                f"Expected loop variable ($identifier), got {loopvar_tok.type.name} {loopvar_tok.value!r}",
+                loopvar_tok.line,
+            )
+        self.consume()
+
+        # Extract the variable name (remove leading $)
+        loopvar_name = loopvar_tok.value[1:] if loopvar_tok.value.startswith("$") else loopvar_tok.value
+
+        self.expect_kw("OVER")
+
+        # Parse the static column list: [col1, col2, ...]
+        columns = self.parse_col_list()
+
+        self.expect_kw("DO")
+
+        # Parse loop body: statements until END
+        body: list[ASTNode] = []
+        while not self.next_is_kw("END"):
+            if self.at_end():
+                raise ParseError("Expected END after FOR body", self.peek().line)
+            body.append(self.parse_statement())
+
+        self.expect_kw("END")
+
+        return AstFor(
+            var=loopvar_name,
+            columns=columns,
+            body=body,
+            line=start_tok.line
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
