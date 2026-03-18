@@ -814,15 +814,149 @@ class _Parser:
     # Do NOT call these in production until implemented.
 
     # Member B
-    def parse_load(self)        -> AstLoad:       raise NotImplementedError("Member B: parse_load")
-    def parse_export(self)      -> AstExport:     raise NotImplementedError("Member B: parse_export")
-    def parse_preview(self)     -> AstPreview:    raise NotImplementedError("Member B: parse_preview")
-    def parse_info(self)        -> AstInfo:        raise NotImplementedError("Member B: parse_info")
-    def parse_describe(self)    -> AstDescribe:   raise NotImplementedError("Member B: parse_describe")
-    def parse_set_engine(self)  -> AstSetEngine:  raise NotImplementedError("Member B: parse_set_engine")
-    def parse_col_list(self)    -> list:          raise NotImplementedError("Member B: parse_col_list")
-    def parse_value_list(self)  -> list:          raise NotImplementedError("Member B: parse_value_list")
-    def parse_value(self)       -> ExprLiteral:   raise NotImplementedError("Member B: parse_value")
+    def parse_load(self)        -> AstLoad:
+        start = self.expect_kw("LOAD")
+        file_tok = self.expect_string()
+        self.expect_kw("AS")
+        name_tok = self.expect_ident()
+
+        raw = file_tok.value
+        file_value = raw[1:-1] if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"' else raw
+        return AstLoad(file=file_value, name=name_tok.value, line=start.line)
+
+    def parse_export(self)      -> AstExport:
+        start = self.expect_kw("EXPORT")
+        name_tok = self.expect_ident()
+        self.expect_kw("TO")
+        file_tok = self.expect_string()
+
+        raw = file_tok.value
+        file_value = raw[1:-1] if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"' else raw
+        return AstExport(name=name_tok.value, file=file_value, line=start.line)
+
+    def parse_preview(self)     -> AstPreview:
+        start = self.expect_kw("PREVIEW")
+        name_tok = self.expect_ident()
+        rows = 5
+        if self.next_is_kw("ROWS"):
+            self.consume()
+            rows_tok = self.expect_int()
+            rows = int(rows_tok.value)
+        return AstPreview(name=name_tok.value, rows=rows, line=start.line)
+
+    def parse_info(self)        -> AstInfo:
+        start = self.expect_kw("INFO")
+        name_tok = self.expect_ident()
+        return AstInfo(name=name_tok.value, line=start.line)
+
+    def parse_describe(self)    -> AstDescribe:
+        start = self.expect_kw("DESCRIBE")
+        name_tok = self.expect_ident()
+        return AstDescribe(name=name_tok.value, line=start.line)
+
+    def parse_set_engine(self)  -> AstSetEngine:
+        start = self.expect_kw("SET")
+        self.expect_kw("ENGINE")
+        tok = self.peek()
+        if tok.type is TokenType.IDENT or (
+            tok.type is TokenType.KW and tok.value in {"PANDAS", "POLARS"}
+        ):
+            self.consume()
+            engine = tok.value.lower()
+            return AstSetEngine(engine=engine, line=start.line)
+        raise ParseError(
+            f"Expected engine name, got {tok.type.name} {tok.value!r}",
+            tok.line,
+        )
+
+    def parse_col_list(self)    -> list:
+        tok = self.peek()
+        if tok.type is not TokenType.LBRACKET:
+            raise ParseError(
+                f"Expected '[' to start column list, got {tok.type.name} {tok.value!r}",
+                tok.line,
+            )
+        self.consume()  # [
+
+        if self.peek().type is TokenType.RBRACKET:
+            tok = self.peek()
+            raise ParseError("Expected column name, got ']'", tok.line)
+
+        cols: list[str] = []
+        while True:
+            tok = self.peek()
+            if tok.type is TokenType.IDENT:
+                cols.append(self.consume().value)
+            elif tok.type is TokenType.STRING:
+                raw = self.consume().value
+                cols.append(raw[1:-1] if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"' else raw)
+            else:
+                raise ParseError(
+                    f"Expected column name, got {tok.type.name} {tok.value!r}",
+                    tok.line,
+                )
+
+            tok = self.peek()
+            if tok.type is TokenType.COMMA:
+                self.consume()
+                continue
+            if tok.type is TokenType.RBRACKET:
+                self.consume()
+                break
+            raise ParseError(
+                f"Expected ',' or ']', got {tok.type.name} {tok.value!r}",
+                tok.line,
+            )
+
+        return cols
+
+    def parse_value_list(self)  -> list:
+        tok = self.peek()
+        if tok.type is not TokenType.LBRACKET:
+            raise ParseError(
+                f"Expected '[' to start value list, got {tok.type.name} {tok.value!r}",
+                tok.line,
+            )
+        self.consume()  # [
+
+        if self.peek().type is TokenType.RBRACKET:
+            tok = self.peek()
+            raise ParseError("Expected value, got ']'", tok.line)
+
+        values: list[ExprLiteral] = []
+        while True:
+            values.append(self.parse_value())
+            tok = self.peek()
+            if tok.type is TokenType.COMMA:
+                self.consume()
+                continue
+            if tok.type is TokenType.RBRACKET:
+                self.consume()
+                break
+            raise ParseError(
+                f"Expected ',' or ']', got {tok.type.name} {tok.value!r}",
+                tok.line,
+            )
+        return values
+
+    def parse_value(self)       -> ExprLiteral:
+        tok = self.peek()
+        if tok.type is TokenType.STRING:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="string", line=tok.line)
+        if tok.type is TokenType.INTEGER:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="integer", line=tok.line)
+        if tok.type is TokenType.FLOAT:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="float", line=tok.line)
+        if tok.type is TokenType.BOOL:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="bool", line=tok.line)
+        raise ParseError(
+            f"Expected literal value, got {tok.type.name} {tok.value!r}",
+            tok.line,
+        )
 
     # Member C
     def parse_drop(self)        -> ASTNode:       raise NotImplementedError("Member C: parse_drop")
