@@ -959,16 +959,275 @@ class _Parser:
         )
 
     # Member C
-    def parse_drop(self)        -> ASTNode:       raise NotImplementedError("Member C: parse_drop")
-    def parse_fill_nulls(self)  -> AstFillNulls:  raise NotImplementedError("Member C: parse_fill_nulls")
-    def parse_cast(self)        -> AstCast:        raise NotImplementedError("Member C: parse_cast")
-    def parse_add_col(self)     -> AstAddCol:      raise NotImplementedError("Member C: parse_add_col")
-    def parse_rename(self)      -> AstRename:      raise NotImplementedError("Member C: parse_rename")
-    def parse_sort(self)        -> AstSort:        raise NotImplementedError("Member C: parse_sort")
-    def parse_select(self)      -> AstSelect:      raise NotImplementedError("Member C: parse_select")
-    def parse_filter(self)      -> AstFilter:      raise NotImplementedError("Member C: parse_filter")
-    def parse_expr(self)        -> Expr:           raise NotImplementedError("Member C: parse_expr")
-    def parse_expr_atom(self)   -> Expr:           raise NotImplementedError("Member C: parse_expr_atom")
+
+    def parse_select(self) -> AstSelect:
+        """SELECT COLUMNS [col, ...] FROM <name>
+        
+        Also supports: SELECT COLUMNS * FROM <name> (all columns)
+        """
+        start = self.expect_kw("SELECT")
+        self.expect_kw("COLUMNS")
+        
+        columns: list[str] = []
+        
+        # Check for wildcard *
+        if self.next_is(TokenType.STAR):
+            self.consume()
+            # Empty list means all columns
+        else:
+            columns = self.parse_col_list()
+        
+        self.expect_kw("FROM")
+        name_tok = self.expect_ident()
+        
+        return AstSelect(name=name_tok.value, columns=columns, line=start.line)
+
+    def parse_filter(self) -> AstFilter:
+        """FILTER <name> WHERE <condition>
+        
+        Note: parse_condition is Member D, so this will call that method.
+        """
+        start = self.expect_kw("FILTER")
+        name_tok = self.expect_ident()
+        self.expect_kw("WHERE")
+        condition = self.parse_condition()
+        
+        return AstFilter(name=name_tok.value, condition=condition, line=start.line)
+
+    def parse_drop(self) -> ASTNode:
+        """DROP NULLS FROM <name> [COLUMNS [col, ...]]
+           DROP DUPLICATES FROM <name> [COLUMNS [col, ...]]
+           DROP COLUMN <col> FROM <name>
+        """
+        start = self.expect_kw("DROP")
+        
+        # Determine which variant
+        tok = self.peek()
+        if tok.type is not TokenType.KW:
+            raise ParseError(
+                f"Expected keyword after DROP, got {tok.type.name} {tok.value!r}",
+                tok.line,
+            )
+        
+        variant = tok.value  # NULLS, DUPLICATES, or COLUMN
+        
+        if variant == "NULLS":
+            self.consume()
+            self.expect_kw("FROM")
+            name_tok = self.expect_ident()
+            
+            columns: list[str] = []
+            if self.next_is_kw("COLUMNS"):
+                self.consume()
+                columns = self.parse_col_list()
+            
+            return AstDropNulls(name=name_tok.value, columns=columns, line=start.line)
+        
+        elif variant == "DUPLICATES":
+            self.consume()
+            self.expect_kw("FROM")
+            name_tok = self.expect_ident()
+            
+            columns: list[str] = []
+            if self.next_is_kw("COLUMNS"):
+                self.consume()
+                columns = self.parse_col_list()
+            
+            return AstDropDups(name=name_tok.value, columns=columns, line=start.line)
+        
+        elif variant == "COLUMN":
+            self.consume()
+            col_tok = self.expect_ident()
+            self.expect_kw("FROM")
+            name_tok = self.expect_ident()
+            
+            return AstDropCol(name=name_tok.value, column=col_tok.value, line=start.line)
+        
+        else:
+            raise ParseError(
+                f"Expected NULLS, DUPLICATES, or COLUMN after DROP, got {tok.value!r}",
+                tok.line,
+            )
+
+    def parse_fill_nulls(self) -> AstFillNulls:
+        """FILL NULLS IN <name> [COLUMNS [col, ...]] WITH <value|method>"""
+        start = self.expect_kw("FILL")
+        self.expect_kw("NULLS")
+        self.expect_kw("IN")
+        name_tok = self.expect_ident()
+        
+        columns: list[str] = []
+        if self.next_is_kw("COLUMNS"):
+            self.consume()
+            columns = self.parse_col_list()
+        
+        self.expect_kw("WITH")
+        fill_value = self.parse_expr()
+        
+        return AstFillNulls(name=name_tok.value, columns=columns, fill=fill_value, line=start.line)
+
+    def parse_cast(self) -> AstCast:
+        """CAST <col> IN <name> TO <type>"""
+        start = self.expect_kw("CAST")
+        col_tok = self.expect_ident()
+        self.expect_kw("IN")
+        name_tok = self.expect_ident()
+        self.expect_kw("TO")
+        
+        # Type should be an identifier or keyword (INT, FLOAT, STR, BOOL, etc.)
+        type_tok = self.peek()
+        if type_tok.type is TokenType.IDENT or type_tok.type is TokenType.KW:
+            self.consume()
+            type_str = type_tok.value
+        else:
+            raise ParseError(
+                f"Expected type name, got {type_tok.type.name} {type_tok.value!r}",
+                type_tok.line,
+            )
+        
+        return AstCast(name=name_tok.value, column=col_tok.value, to=type_str, line=start.line)
+
+    def parse_add_col(self) -> AstAddCol:
+        """ADD COLUMN <col> TO <name> AS <expr>"""
+        start = self.expect_kw("ADD")
+        self.expect_kw("COLUMN")
+        col_tok = self.expect_ident()
+        self.expect_kw("TO")
+        name_tok = self.expect_ident()
+        self.expect_kw("AS")
+        expr = self.parse_expr()
+        
+        return AstAddCol(name=name_tok.value, column=col_tok.value, expr=expr, line=start.line)
+
+    def parse_rename(self) -> AstRename:
+        """RENAME <old> TO <new> IN <name>"""
+        start = self.expect_kw("RENAME")
+        old_tok = self.expect_ident()
+        self.expect_kw("TO")
+        new_tok = self.expect_ident()
+        self.expect_kw("IN")
+        name_tok = self.expect_ident()
+        
+        return AstRename(name=name_tok.value, old=old_tok.value, new=new_tok.value, line=start.line)
+
+    def parse_sort(self) -> AstSort:
+        """SORT <name> BY <col> [ASC|DESC]"""
+        start = self.expect_kw("SORT")
+        name_tok = self.expect_ident()
+        self.expect_kw("BY")
+        col_tok = self.expect_ident()
+        
+        direction = "ASC"  # default
+        if self.next_is_kw("ASC"):
+            self.consume()
+            direction = "ASC"
+        elif self.next_is_kw("DESC"):
+            self.consume()
+            direction = "DESC"
+        
+        return AstSort(name=name_tok.value, column=col_tok.value, direction=direction, line=start.line)
+
+    def parse_expr(self) -> Expr:
+        """Parse an expression with binary operators.
+        
+        Uses recursive descent with proper precedence:
+        - parse_expr: handles +, - (lowest precedence)
+        - parse_expr_term: handles *, /, % (higher precedence)
+        - parse_expr_atom: handles literals, column refs, parentheses
+        """
+        return self._parse_expr_additive()
+
+    def _parse_expr_additive(self) -> Expr:
+        """Parse addition/subtraction (lowest precedence)."""
+        left = self._parse_expr_multiplicative()
+        
+        while self.next_is(TokenType.ARITH_OP):
+            tok = self.peek()
+            if tok.value not in {"+", "-"}:
+                break
+            op_tok = self.consume()
+            right = self._parse_expr_multiplicative()
+            left = ExprBinop(op=op_tok.value, left=left, right=right, line=op_tok.line)
+        
+        return left
+
+    def _parse_expr_multiplicative(self) -> Expr:
+        """Parse multiplication/division/modulo (higher precedence)."""
+        left = self.parse_expr_atom()
+        
+        while self.next_is(TokenType.ARITH_OP) or self.next_is(TokenType.STAR):
+            tok = self.peek()
+            # For STAR, only treat as operator in expression context (not in SELECT COLUMNS *)
+            if tok.type is TokenType.STAR:
+                # In expression context, * is multiplication
+                op_tok = self.consume()
+                right = self.parse_expr_atom()
+                left = ExprBinop(op="*", left=left, right=right, line=op_tok.line)
+            elif tok.type is TokenType.ARITH_OP and tok.value in {"*", "/", "%"}:
+                op_tok = self.consume()
+                right = self.parse_expr_atom()
+                left = ExprBinop(op=op_tok.value, left=left, right=right, line=op_tok.line)
+            else:
+                break
+        
+        return left
+
+    def parse_expr_atom(self) -> Expr:
+        """Parse atomic expressions: literals, column references, parentheses."""
+        tok = self.peek()
+        
+        # Numeric literal
+        if tok.type is TokenType.INTEGER:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="integer", line=tok.line)
+        
+        if tok.type is TokenType.FLOAT:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="float", line=tok.line)
+        
+        # String literal
+        if tok.type is TokenType.STRING:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="string", line=tok.line)
+        
+        # Boolean literal
+        if tok.type is TokenType.BOOL:
+            self.consume()
+            return ExprLiteral(value=tok.value, kind="bool", line=tok.line)
+        
+        # Column reference: ident or df.ident or $ident (loopvar)
+        if tok.type is TokenType.IDENT:
+            name_tok = self.consume()
+            df = None
+            
+            # Check for df.column notation
+            if self.next_is(TokenType.DOT):
+                self.consume()
+                col_tok = self.expect_ident()
+                return ExprColRef(name=col_tok.value, df=name_tok.value, is_loopvar=False, line=name_tok.line)
+            
+            return ExprColRef(name=name_tok.value, df=None, is_loopvar=False, line=name_tok.line)
+        
+        # Loop variable: $ident
+        if tok.type is TokenType.LOOPVAR:
+            loopvar_tok = self.consume()
+            # Remove leading $ from the value
+            name = loopvar_tok.value[1:] if loopvar_tok.value.startswith("$") else loopvar_tok.value
+            return ExprColRef(name=name, df=None, is_loopvar=True, line=loopvar_tok.line)
+        
+        # Parenthesized expression
+        if tok.type is TokenType.LBRACKET:
+            # In expression context, [ starts a parenthesized expression? Or is it just for lists?
+            # For now, treat [ as an error in expression context
+            raise ParseError(
+                f"Unexpected '[' in expression, got {tok.type.name} {tok.value!r}",
+                tok.line,
+            )
+        
+        raise ParseError(
+            f"Expected literal, column reference, or loop variable, got {tok.type.name} {tok.value!r}",
+            tok.line,
+        )
 
     # Member D
     def parse_group(self)       -> AstGroup:       raise NotImplementedError("Member D: parse_group")
