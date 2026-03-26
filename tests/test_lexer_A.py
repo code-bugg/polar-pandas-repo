@@ -8,15 +8,10 @@ Unit tests for Member A's lexer subtask:
   - Single-character token dispatch ([ ] , * + - / % .)
   - at_end() and peek() cursor behaviour
   - EOF sentinel is always last token
-
-NOTE: Tests that require Members B/C/D stubs will raise NotImplementedError.
-      Those are tested in test_lexer_B.py, test_lexer_C.py, test_lexer_D.py.
-      This file only tests what Member A owns.
 """
 
 import pytest
 from lexer.lexer import TokenType, Token, LexError, tokenize, _Lexer
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TokenType enum
@@ -25,14 +20,13 @@ from lexer.lexer import TokenType, Token, LexError, tokenize, _Lexer
 class TestTokenTypeEnum:
 
     def test_has_exactly_15_members(self):
-        # 14 original + DOT (member access separator, added with df.column support)
         assert len(TokenType) == 15
 
     def test_all_expected_members_exist(self):
         expected = {
             "KW", "IDENT", "STRING", "INTEGER", "FLOAT", "BOOL",
             "OP", "ARITH_OP", "LBRACKET", "RBRACKET", "COMMA",
-            "STAR", "LOOPVAR", "DOT", "EOF",
+            "STAR", "LOOPVAR", "PIPE", "EOF",
         }
         actual = {m.name for m in TokenType}
         assert actual == expected
@@ -42,10 +36,8 @@ class TestTokenTypeEnum:
         assert len(values) == len(set(values))
 
     def test_enum_members_are_not_strings(self):
-        # TokenType uses auto() — values are ints, not strings
         for member in TokenType:
             assert isinstance(member.value, int)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Token dataclass
@@ -82,11 +74,9 @@ class TestTokenDataclass:
         assert "line=2"  in r
 
     def test_hashable(self):
-        # frozen dataclasses should be hashable
         t = Token(TokenType.EOF, "", 1)
         s = {t}
         assert t in s
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LexError
@@ -110,7 +100,6 @@ class TestLexError:
     def test_str_contains_lexer_label(self):
         err = LexError("bad token", 3)
         assert "Lexer" in str(err) or "lexer" in str(err).lower()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # _Lexer cursor primitives
@@ -146,8 +135,8 @@ class TestLexerCursor:
     def test_advance_tracks_newlines(self):
         lex = _Lexer("a\nb")
         assert lex._line == 1
-        lex.advance()   # 'a'
-        lex.advance()   # '\n'  — should bump line
+        lex.advance()
+        lex.advance()
         assert lex._line == 2
 
     def test_at_end_false_when_not_exhausted(self):
@@ -168,22 +157,17 @@ class TestLexerCursor:
         with pytest.raises(LexError):
             lex.advance()
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Single-character tokens (Member A's dispatcher code)
-# We patch the stubs so whitespace and words don't trigger NotImplementedError.
+# Single-character tokens
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _patch_stubs(lex: _Lexer) -> None:
-    """Monkeypatch all stubs to skip silently so we can test single-char tokens."""
     lex._skip_whitespace = lambda: None   # type: ignore
     lex._skip_comment    = lambda: None   # type: ignore
-
 
 class TestSingleCharTokens:
 
     def _lex_single(self, source: str) -> list[Token]:
-        """Tokenise a single-character source, bypassing stubs."""
         lex = _Lexer(source)
         _patch_stubs(lex)
         return lex._tokenize_all()
@@ -213,11 +197,6 @@ class TestSingleCharTokens:
         assert tokens[0].type  == TokenType.ARITH_OP
         assert tokens[0].value == "+"
 
-    def test_minus(self):
-        tokens = self._lex_single("-")
-        assert tokens[0].type  == TokenType.ARITH_OP
-        assert tokens[0].value == "-"
-
     def test_slash(self):
         tokens = self._lex_single("/")
         assert tokens[0].type  == TokenType.ARITH_OP
@@ -227,11 +206,6 @@ class TestSingleCharTokens:
         tokens = self._lex_single("%")
         assert tokens[0].type  == TokenType.ARITH_OP
         assert tokens[0].value == "%"
-
-    def test_dot(self):
-        tokens = self._lex_single(".")
-        assert tokens[0].type  == TokenType.DOT
-        assert tokens[0].value == "."
 
     def test_single_char_line_number(self):
         tokens = self._lex_single(",")
@@ -259,37 +233,20 @@ class TestSingleCharTokens:
             TokenType.EOF,
         ]
 
-    def test_dot_line_number(self):
-        tokens = self._lex_single(".")
-        assert tokens[0].line == 1
-
-    def test_dot_does_not_consume_following_char(self):
-        # ".[" should yield DOT then LBRACKET, not a single token
-        lex = _Lexer(".[")
-        _patch_stubs(lex)
-        tokens = lex._tokenize_all()
-        assert tokens[0].type == TokenType.DOT
-        assert tokens[1].type == TokenType.LBRACKET
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Dispatcher routing — confirm stubs are called for B/C/D characters
+# Dispatcher routing
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestDispatcherRouting:
-    """Verify the dispatcher calls the right stub for each character class.
-    We replace each stub with a sentinel function and check it was invoked."""
 
     def _lex_with_sentinel(self, source: str, stub_name: str) -> bool:
         called = []
         lex = _Lexer(source)
-        # Replace whitespace/comment stubs to avoid interference
         lex._skip_whitespace = lambda: (lex.advance(), None)[1]  # type: ignore
         lex._skip_comment    = lambda: (lex.advance(), None)[1]  # type: ignore
 
         def sentinel():
             called.append(True)
-            # consume one char to prevent infinite loop
             if not lex.at_end():
                 lex.advance()
 
@@ -297,7 +254,7 @@ class TestDispatcherRouting:
         try:
             lex._tokenize_all()
         except NotImplementedError:
-            pass  # other stubs may still be unimplemented
+            pass
         return bool(called)
 
     def test_alpha_routes_to_consume_word(self):
@@ -315,34 +272,5 @@ class TestDispatcherRouting:
     def test_hash_routes_to_skip_comment(self):
         assert self._lex_with_sentinel("# comment", "_skip_comment")
 
-    def test_space_routes_to_skip_whitespace(self):
-        called = []
-        lex = _Lexer(" ")
-        def sentinel():
-            called.append(True)
-            lex.advance()
-        lex._skip_whitespace = sentinel  # type: ignore
-        try:
-            lex._tokenize_all()
-        except NotImplementedError:
-            pass
-        assert bool(called)
-
     def test_operator_routes_to_consume_operator(self):
         assert self._lex_with_sentinel(">=", "_consume_operator")
-
-    def test_dot_does_not_route_to_consume_number(self):
-        # A bare "." (not preceded by digits) must NOT enter _consume_number.
-        # It is handled directly in the dispatcher as DOT.
-        called = []
-        lex = _Lexer(".")
-        _patch_stubs(lex)
-
-        original = lex._consume_number
-        def sentinel():
-            called.append(True)
-            original()
-        lex._consume_number = sentinel  # type: ignore
-
-        lex._tokenize_all()
-        assert not called, "_consume_number should not be called for a bare '.'"

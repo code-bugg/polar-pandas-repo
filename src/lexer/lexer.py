@@ -242,7 +242,7 @@ class _Lexer:
         word  = self._source[start_pos : self._pos]
         upper = word.upper()
         if upper in self._BOOLEANS:
-            self._emit(TokenType.BOOL, upper.lower(), start_line)
+            self._emit(TokenType.BOOL, upper, start_line)
         elif upper in self.KEYWORDS:
             self._emit(TokenType.KW, upper, start_line)
         else:
@@ -301,7 +301,7 @@ class _Lexer:
         first = self.peek()
         if first is None or not (first.isalpha() or first == "_"):
             raise LexError(
-                "'$' must be immediately followed by a letter or underscore",
+                "'$' must be followed by a letter or underscore",
                 start_line,
             )
         start_pos = self._pos
