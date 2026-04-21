@@ -1,95 +1,114 @@
-"""
-tests/test_parser_B.py
-======================
-Unit tests for Member B's parser subtask:
-  - I/O and inspection statements: LOAD, EXPORT, PREVIEW, INFO, DESCRIBE
-  - Configuration statement: SET ENGINE
-  - Shared helpers: parse_col_list(), parse_value_list(), parse_value()
-"""
-
 import pytest
 
 from lexer.lexer import tokenize
 from parser.parser import (
     ParseError,
-    ExprLiteral,
-    AstLoad, AstExport, AstPreview, AstInfo, AstDescribe, AstSetEngine,
-    _Parser, parse,
+    AstRead,
+    AstSave,
+    AstPreview,
+    AstInfo,
+    AstDropEmpty,
+    AstDropDuplicates,
+    AstDropColumns,
+    AstFillEmpty,
+    AstKeep,
+    AstCast,
+    AstSet,
+    AstRename,
+    AstSort,
+    AstGroupBy,
+    AstMerge,
+    parse,
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+class TestIO:
+    def test_read(self):
+        ast = parse(tokenize("READ 'sales.csv'"))
+        assert ast == [AstRead(path="sales.csv", line=1)]
 
-def _parser(source: str) -> _Parser:
-    return _Parser(tokenize(source))
+    def test_save(self):
+        ast = parse(tokenize("SAVE 'out.parquet'"))
+        assert ast == [AstSave(path="out.parquet", line=1)]
 
+    def test_preview_default(self):
+        ast = parse(tokenize("PREVIEW"))
+        assert ast == [AstPreview(rows=5, line=1)]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Statement parsing
-# ─────────────────────────────────────────────────────────────────────────────
+    def test_preview_value(self):
+        ast = parse(tokenize("PREVIEW 10"))
+        assert ast == [AstPreview(rows=10, line=1)]
 
-class TestIOAndInspectionStatements:
-
-    def test_parse_load(self):
-        ast = parse(tokenize('LOAD "data.csv" AS df'))
-        assert ast == [AstLoad(file="data.csv", name="df", line=1)]
-
-    def test_parse_export(self):
-        ast = parse(tokenize('EXPORT df TO "out.csv"'))
-        assert ast == [AstExport(name="df", file="out.csv", line=1)]
-
-    def test_parse_preview_default_rows(self):
-        ast = parse(tokenize("PREVIEW df"))
-        assert ast == [AstPreview(name="df", rows=5, line=1)]
-
-    def test_parse_preview_with_rows(self):
-        ast = parse(tokenize("PREVIEW df ROWS 10"))
-        assert ast == [AstPreview(name="df", rows=10, line=1)]
-
-    def test_parse_info(self):
-        ast = parse(tokenize("INFO df"))
-        assert ast == [AstInfo(name="df", line=1)]
-
-    def test_parse_describe(self):
-        ast = parse(tokenize("DESCRIBE df"))
-        assert ast == [AstDescribe(name="df", line=1)]
-
-    def test_parse_set_engine(self):
-        ast = parse(tokenize("SET ENGINE POLARS"))
-        assert ast == [AstSetEngine(engine="polars", line=1)]
+    def test_info(self):
+        ast = parse(tokenize("INFO"))
+        assert ast == [AstInfo(line=1)]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+class TestCleaningTransform:
+    def test_drop_empty_all(self):
+        ast = parse(tokenize("DROP EMPTY"))
+        assert ast == [AstDropEmpty(columns=[], line=1)]
 
-class TestSharedHelpers:
+    def test_drop_empty_columns(self):
+        ast = parse(tokenize("DROP EMPTY revenue, cost"))
+        assert ast == [AstDropEmpty(columns=["revenue", "cost"], line=1)]
 
-    def test_parse_col_list(self):
-        p = _parser('[a, "b", c]')
-        cols = p.parse_col_list()
-        assert cols == ["a", "b", "c"]
-        assert p.at_end()
+    def test_drop_duplicates(self):
+        ast = parse(tokenize("DROP DUPLICATES"))
+        assert ast == [AstDropDuplicates(line=1)]
 
-    def test_parse_value(self):
-        p = _parser('"x"')
-        lit = p.parse_value()
-        assert lit == ExprLiteral(value='"x"', kind="string", line=1)
+    def test_drop_columns(self):
+        ast = parse(tokenize("DROP a, b"))
+        assert ast == [AstDropColumns(columns=["a", "b"], line=1)]
 
-    def test_parse_value_list(self):
-        p = _parser('[1, 2.5, "x", true]')
-        values = p.parse_value_list()
-        assert values == [
-            ExprLiteral(value="1", kind="integer", line=1),
-            ExprLiteral(value="2.5", kind="float", line=1),
-            ExprLiteral(value='"x"', kind="string", line=1),
-            ExprLiteral(value="TRUE", kind="bool", line=1),
-        ]
-        assert p.at_end()
+    def test_fill_empty_literal(self):
+        ast = parse(tokenize("FILL EMPTY salary WITH 0"))
+        assert isinstance(ast[0], AstFillEmpty)
+        assert ast[0].column == "salary"
 
-    def test_parse_value_rejects_non_literal(self):
-        p = _parser("foo")
+    def test_keep(self):
+        ast = parse(tokenize("KEEP name, age, region"))
+        assert ast == [AstKeep(columns=["name", "age", "region"], line=1)]
+
+    def test_cast_no_policy(self):
+        ast = parse(tokenize("CAST age TO NUMBER"))
+        assert ast == [AstCast(column="age", dtype="NUMBER", on_error=None, line=1)]
+
+    def test_cast_with_policy(self):
+        ast = parse(tokenize("CAST age TO NUMBER (ON ERROR SKIP)"))
+        assert ast == [AstCast(column="age", dtype="NUMBER", on_error="SKIP", line=1)]
+
+    def test_set(self):
+        ast = parse(tokenize("SET margin = revenue - cost"))
+        assert isinstance(ast[0], AstSet)
+        assert ast[0].column == "margin"
+
+    def test_rename(self):
+        ast = parse(tokenize("RENAME cust_id TO id"))
+        assert ast == [AstRename(old="cust_id", new="id", line=1)]
+
+    def test_sort(self):
+        ast = parse(tokenize("SORT BY revenue DESC"))
+        assert ast == [AstSort(column="revenue", direction="DESC", line=1)]
+
+    def test_group(self):
+        ast = parse(tokenize("GROUP BY region SUM total"))
+        assert ast == [AstGroupBy(by=["region"], agg="SUM", column="total", line=1)]
+
+    def test_merge_ident(self):
+        ast = parse(tokenize("MERGE customers ON id LEFT"))
+        assert ast == [AstMerge(source="customers", source_is_file=False, on="id", how="LEFT", line=1)]
+
+    def test_merge_path(self):
+        ast = parse(tokenize("MERGE 'regions.csv' ON region_id"))
+        assert ast == [AstMerge(source="regions.csv", source_is_file=True, on="region_id", how="INNER", line=1)]
+
+
+class TestErrors:
+    def test_preview_rejects_float(self):
         with pytest.raises(ParseError):
-            p.parse_value()
+            parse(tokenize("PREVIEW 2.5"))
+
+    def test_set_requires_assign(self):
+        with pytest.raises(ParseError):
+            parse(tokenize("SET x 1"))
