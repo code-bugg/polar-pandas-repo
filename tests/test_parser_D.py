@@ -1,214 +1,87 @@
-"""
-Test suite for Member D: Aggregation, Join, Plot, and Control Flow Parsers
-"""
 import pytest
-from lexer.lexer import tokenize, TokenType
-from parser.parser import parse, ParseError
+
+from lexer.lexer import tokenize
 from parser.parser import (
-    AstGroup, AstCount, AstJoin, AstPlot, AstIf, AstFor,
-    CondCompare, CondAnd, CondOr, CondIn, CondNull
+    ParseError,
+    MetaExists,
+    MetaRowCount,
+    MetaAnd,
+    AstPipeline,
+    AstDropEmpty,
+    AstFilter,
+    AstSet,
+    AstIf,
+    AstFor,
+    parse,
 )
 
 
-class TestParseGroup:
-    def test_group_basic(self):
-        tokens = tokenize('GROUP sales BY region USING sum ON amount')
-        ast = parse(tokens)
-        assert len(ast) == 1
+class TestPipeline:
+    def test_named_pipeline(self):
+        ast = parse(tokenize("orders -> FILTER WHERE total > 0 -> DROP EMPTY"))
         node = ast[0]
-        assert isinstance(node, AstGroup)
-        assert node.name == "sales"
-        assert node.by == "region"
-        assert node.agg == "sum"
-        assert node.on == "amount"
-        assert node.result is None
+        assert isinstance(node, AstPipeline)
+        assert node.target == "orders"
+        assert len(node.steps) == 2
+        assert isinstance(node.steps[0], AstFilter)
+        assert isinstance(node.steps[1], AstDropEmpty)
 
-    def test_group_with_result(self):
-        tokens = tokenize('GROUP data BY month USING avg ON revenue AS monthly_avg')
-        ast = parse(tokens)
+    def test_active_pipeline(self):
+        ast = parse(tokenize("-> SET gross = amount + tax -> DROP EMPTY amount"))
         node = ast[0]
-        assert isinstance(node, AstGroup)
-        assert node.result == "monthly_avg"
+        assert isinstance(node, AstPipeline)
+        assert node.target is None
+        assert isinstance(node.steps[0], AstSet)
 
 
-class TestParseCount:
-    def test_count_basic(self):
-        tokens = tokenize('COUNT ROWS IN df')
-        ast = parse(tokens)
-        node = ast[0]
-        assert isinstance(node, AstCount)
-        assert node.name == "df"
-        assert node.result is None
-
-    def test_count_with_result(self):
-        tokens = tokenize('COUNT ROWS IN df AS total')
-        ast = parse(tokens)
-        node = ast[0]
-        assert isinstance(node, AstCount)
-        assert node.result == "total"
-
-
-class TestParseJoin:
-    def test_join_basic(self):
-        tokens = tokenize('JOIN customers WITH orders ON customer_id')
-        ast = parse(tokens)
-        node = ast[0]
-        assert isinstance(node, AstJoin)
-        assert node.left == "customers"
-        assert node.right == "orders"
-        assert node.on == "customer_id"
-        assert node.how == "INNER"
-        assert node.result is None
-
-    def test_join_with_type(self):
-        tokens = tokenize('JOIN a WITH b ON id LEFT')
-        ast = parse(tokens)
-        node = ast[0]
-        assert node.how == "LEFT"
-
-    def test_join_with_result(self):
-        tokens = tokenize('JOIN a WITH b ON id RIGHT AS combined')
-        ast = parse(tokens)
-        node = ast[0]
-        assert node.how == "RIGHT"
-        assert node.result == "combined"
-
-
-class TestParsePlot:
-    def test_plot_basic(self):
-        tokens = tokenize('PLOT data TYPE bar X month Y sales')
-        ast = parse(tokens)
-        node = ast[0]
-        assert isinstance(node, AstPlot)
-        assert node.name == "data"
-        assert node.kind == "bar"
-        assert node.x == "month"
-        assert node.y == "sales"
-        assert node.title is None
-        assert node.save is None
-
-    def test_plot_with_title(self):
-        tokens = tokenize('PLOT data TYPE line X date Y revenue TITLE "Revenue Over Time"')
-        ast = parse(tokens)
-        node = ast[0]
-        assert node.title == "Revenue Over Time"
-
-    def test_plot_with_save(self):
-        tokens = tokenize('PLOT data TYPE scatter X price Y quantity SAVE "chart.png"')
-        ast = parse(tokens)
-        node = ast[0]
-        assert node.save == "chart.png"
-
-    def test_plot_all_options(self):
-        tokens = tokenize('PLOT data TYPE hist X amount Y count TITLE "Distribution" SAVE "hist.png"')
-        ast = parse(tokens)
-        node = ast[0]
-        assert node.x == "amount"
-        assert node.y == "count"
-        assert node.title == "Distribution"
-        assert node.save == "hist.png"
-
-
-class TestParseCondition:
-    def test_condition_simple_compare(self):
-        """Test a simple comparison condition."""
-        tokens = tokenize('FILTER df WHERE amount >= 100')
-        ast = parse(tokens)
-        node = ast[0]
-        cond = node.condition
-        assert isinstance(cond, CondCompare)
-        assert cond.op == ">="
-
-    def test_condition_and(self):
-        """Test AND precedence (higher than OR)."""
-        tokens = tokenize('FILTER df WHERE amount > 50 AND status == "active"')
-        ast = parse(tokens)
-        cond = ast[0].condition
-        assert isinstance(cond, CondAnd)  # AND should combine two comparisons
-        assert isinstance(cond.left, CondCompare)
-        assert isinstance(cond.right, CondCompare)
-        assert cond.left.op == ">"
-        assert cond.right.op == "=="
-
-    def test_condition_or(self):
-        """Test OR precedence (lower than AND)."""
-        tokens = tokenize('FILTER df WHERE a == 1 OR b == 2')
-        ast = parse(tokens)
-        # Verify that OR is parsed correctly with proper precedence
-
-
-class TestParseIf:
-    def test_if_basic(self):
-        """Simple IF without ELSE."""
-        tokens = tokenize('''IF sales > 1000 THEN
-            COUNT ROWS IN df
-        END''')
-        ast = parse(tokens)
+class TestIfFor:
+    def test_if_exists(self):
+        source = "IF EXISTS reference_table : MERGE reference_table ON code LEFT END"
+        ast = parse(tokenize(source))
         node = ast[0]
         assert isinstance(node, AstIf)
+        assert isinstance(node.condition, MetaExists)
         assert len(node.then_body) == 1
-        assert len(node.else_body) == 0
-        assert isinstance(node.condition, CondCompare)
 
-    def test_if_with_else(self):
-        """IF with ELSE branch."""
-        tokens = tokenize('''IF amount > 100 THEN
-            FILTER df WHERE amount >= 100
-        ELSE
-            FILTER df WHERE amount < 100
-        END''')
-        ast = parse(tokens)
+    def test_if_rowcount(self):
+        source = "IF ROWCOUNT orders > 50000 : DROP EMPTY ELSE FILL EMPTY amount WITH 0 END"
+        ast = parse(tokenize(source))
         node = ast[0]
-        assert isinstance(node, AstIf)
+        assert isinstance(node.condition, MetaRowCount)
+        assert node.condition.op == ">"
         assert len(node.then_body) == 1
         assert len(node.else_body) == 1
 
-    def test_if_nested(self):
-        """Nested IF statements."""
-        tokens = tokenize('''IF a > 5 THEN
-            IF b > 10 THEN
-                COUNT ROWS IN df
-            END
-        END''')
-        ast = parse(tokens)
-        outer = ast[0]
-        assert isinstance(outer, AstIf)
-        inner = outer.then_body[0]
-        assert isinstance(inner, AstIf)
+    def test_if_with_logical_meta(self):
+        source = "IF EXISTS a AND ROWCOUNT b > 0 : INFO END"
+        node = parse(tokenize(source))[0]
+        assert isinstance(node.condition, MetaAnd)
 
-
-class TestParseFor:
-    def test_for_basic(self):
-        """Basic FOR loop."""
-        tokens = tokenize('''FOR EACH $col OVER [amount, revenue] DO
-            CAST $col IN df TO FLOAT
-        END''')
-        ast = parse(tokens)
+    def test_for(self):
+        source = "FOR $col IN age, weight, bmi : CAST $col TO NUMBER (ON ERROR SKIP) FILL EMPTY $col WITH mean END"
+        ast = parse(tokenize(source))
         node = ast[0]
         assert isinstance(node, AstFor)
         assert node.var == "col"
-        assert node.columns == ["amount", "revenue"]
-        assert len(node.body) == 1
-
-    def test_for_multiple_columns(self):
-        """FOR loop with many columns."""
-        tokens = tokenize('''FOR EACH $field OVER [name, email, address] DO
-            COUNT ROWS IN df
-        END''')
-        ast = parse(tokens)
-        node = ast[0]
-        assert node.columns == ["name", "email", "address"]
-
-    def test_for_multiple_statements(self):
-        """FOR loop with multiple body statements."""
-        tokens = tokenize('''FOR EACH $col OVER [x, y] DO
-            CAST $col IN df TO INT
-            FILL NULLS IN df COLUMNS [$col] WITH 0
-        END''')
-        ast = parse(tokens)
-        node = ast[0]
+        assert node.columns == ["age", "weight", "bmi"]
         assert len(node.body) == 2
 
+    def test_nested_blocks(self):
+        source = "IF EXISTS x : FOR $c IN a, b : DROP EMPTY $c END END"
+        ast = parse(tokenize(source))
+        assert isinstance(ast[0], AstIf)
+        assert isinstance(ast[0].then_body[0], AstFor)
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+
+class TestBlockErrors:
+    def test_if_requires_colon(self):
+        with pytest.raises(ParseError):
+            parse(tokenize("IF EXISTS x INFO END"))
+
+    def test_for_requires_loopvar(self):
+        with pytest.raises(ParseError):
+            parse(tokenize("FOR col IN a : INFO END"))
+
+    def test_pipeline_requires_arrow(self):
+        with pytest.raises(ParseError):
+            parse(tokenize("orders FILTER WHERE a > 0"))
